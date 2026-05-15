@@ -16,6 +16,8 @@ def test_track_gets_uuid_and_defaults(session: Session) -> None:
     assert track.status is TrackStatus.queued
     assert track.added_at is not None
     assert track.extracted_at is None
+    assert track.taste_weight == 1.0  # full influence until provenance/edits say otherwise
+    assert track.taste_weight_auto is True
 
 
 def test_multiple_tracks_may_have_null_external_ids(session: Session) -> None:

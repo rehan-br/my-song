@@ -62,38 +62,77 @@ def auth() -> None:
 
 @app.command()
 def sync() -> None:
-    """Pull the Spotify saved library + playlists into the local database."""
+    """Pull the Spotify library, playlists and listening signals.
+
+    Saved/playlist/top tracks are ingested with provenance, then each track's
+    Spotify listening signals (top-track tier, recency) are recorded. These are
+    observed inputs for the taste model — `sync` does not assign taste weights.
+    """
+    from sqlmodel import select
+
     from acquisition import resolver
+    from acquisition.base import Provenance
     from acquisition.spotify import SpotifyClient
     from storage import db
+    from storage.schema import Track
+    from taste_model import engagement
 
     cfg = _cfg()
     client = SpotifyClient(cfg)  # type: ignore[arg-type]
-    seen = created = 0
+    created = 0
+
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-        for ref in client.iter_library():
-            seen += 1
-            _, is_new = resolver.upsert_track(session, ref)
+        # Pass 1 — ingest saved + playlist tracks with provenance.
+        for ref, source in client.iter_library():
+            _, is_new = resolver.upsert_track(session, ref, source)
             created += int(is_new)
-    log.info("sync.done", seen=seen, created=created)
+
+        # Pass 1b — ingest Spotify top tracks; build the affinity map.
+        top_map: dict[str, tuple[str, int]] = {}
+        for ref, term, rank in client.iter_top_tracks():
+            _, is_new = resolver.upsert_track(session, ref, Provenance("top"))
+            created += int(is_new)
+            if ref.spotify_id:
+                top_map[ref.spotify_id] = (term, rank)  # short->long; long wins
+
+        recent_map = client.recently_played()
+        session.flush()
+
+        # Pass 2 — record listening signals (observed data, not a weighting).
+        signalled = engagement.refresh_listening_signals(session, top_map, recent_map)
+        total = len(session.exec(select(Track)).all())
+
+    log.info("sync.done", total=total, created=created, signalled=signalled)
     typer.secho(
-        f"Synced {seen} tracks — {created} new, {seen - created} already known.",
+        f"Synced — {total} tracks ({created} new). Recorded listening signals for {signalled}.",
         fg=typer.colors.GREEN,
     )
 
 
 @app.command()
 def add(query: Annotated[str, typer.Argument(help='"<artist> - <title>"')]) -> None:
-    """Add a track manually and queue it for download."""
+    """Add a track manually — an explicit taste signal.
+
+    A manual add is the user saying "make this count", so the track is marked
+    as a pinned taste signal (taste_weight_auto = false): once the taste model
+    assigns weights, it will leave this track alone.
+    """
     from acquisition import manual, resolver
+    from acquisition.base import Provenance
     from storage import db
 
     cfg = _cfg()
     ref = manual.parse_manual_entry(query)
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-        _, is_new = resolver.upsert_track(session, ref)
-    verb = "Queued" if is_new else "Already known"
-    typer.secho(f"{verb}: {ref.artist} — {ref.title}", fg=typer.colors.GREEN)
+        track, is_new = resolver.upsert_track(session, ref, Provenance("manual"))
+        track.taste_weight = 1.0  # explicit full influence
+        track.taste_weight_auto = False  # pinned — the taste model won't lower it
+        session.add(track)
+    verb = "Added" if is_new else "Updated"
+    typer.secho(
+        f"{verb} (pinned as an explicit taste signal): {ref.artist} — {ref.title}",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()

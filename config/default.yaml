@@ -15,10 +15,13 @@ paths:
   logs: logs
 
 spotify:
-  # Keep scopes minimal — invariant: personal-use posture (CLAUDE.md).
+  # Read-only scopes. user-top-read + user-read-recently-played feed the
+  # automatic engagement weighting (see taste.engagement below).
   scopes:
     - user-library-read
     - playlist-read-private
+    - user-top-read              # top tracks — taste affinity signal
+    - user-read-recently-played  # recent plays — recency signal
   # Must exactly match a Redirect URI registered on the Spotify app.
   # Spotify requires a loopback IP (127.0.0.1), not "localhost".
   redirect_uri: "http://127.0.0.1:8080/callback"
@@ -29,6 +32,11 @@ acquisition:
   youtube:
     audio_format: m4a
     search_results: 5
+
+# NOTE: taste_weight is deliberately NOT computed by a Phase-0 heuristic.
+# `sync` records listening signals (top-track tier, recency, provenance) as
+# observed data; how those translate into influence is owned by the taste
+# model + feedback loop (Phase 2+), not a hand-tuned formula here.
 
 logging:
   level: INFO

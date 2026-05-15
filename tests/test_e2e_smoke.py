@@ -25,8 +25,10 @@ def test_pull_saved_library() -> None:
     from core.config import load_config
 
     client = SpotifyClient(load_config())
-    refs = list(itertools.islice(client.iter_saved_tracks(), 10))
+    pairs = list(itertools.islice(client.iter_saved_tracks(), 10))
 
-    assert refs, "expected at least one saved track in the library"
+    assert pairs, "expected at least one saved track in the library"
+    refs = [ref for ref, _source in pairs]
     assert all(ref.spotify_id for ref in refs)
     assert all(ref.title and ref.artist for ref in refs)
+    assert all(source.source_type == "saved" for _ref, source in pairs)

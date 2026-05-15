@@ -24,6 +24,20 @@ class TrackRef:
 
 
 @dataclass(slots=True)
+class Provenance:
+    """How a track entered the library.
+
+    Passed to the resolver so it can record provenance and seed the track's
+    taste weight. ``source_type`` is one of "saved" / "playlist" / "manual"
+    (kept as a plain str here so this module stays free of storage imports).
+    """
+
+    source_type: str
+    source_ref: str = ""  # playlist id; "" for saved/manual
+    source_name: str | None = None
+
+
+@dataclass(slots=True)
 class AudioCandidate:
     """A concrete fetchable result returned by an AudioSource search."""
 

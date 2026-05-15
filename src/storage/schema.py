@@ -48,6 +48,15 @@ class StemKind(StrEnum):
     other = "other"
 
 
+class SourceType(StrEnum):
+    """How a track entered the library — seeds its provenance floor weight."""
+
+    saved = "saved"  # Spotify "Liked Songs" — strong taste signal
+    playlist = "playlist"  # a Spotify playlist — themed, weaker signal
+    top = "top"  # a Spotify top track — strong affinity signal
+    manual = "manual"  # explicitly added via `music add`
+
+
 class Track(SQLModel, table=True):
     """One resolved track. External IDs are nullable and individually unique."""
 
@@ -62,9 +71,39 @@ class Track(SQLModel, table=True):
     album: str | None = None
     duration_ms: int = 0
     audio_path: str | None = None  # relative to data/audio/
+    # How much this track influences the taste model (0 = ignored, 1 = full).
+    # Deliberately NOT set by a Phase-0 heuristic — weighting is owned by the
+    # taste model + feedback loop (Phase 2+). Uniform 1.0 until then.
+    taste_weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    # False once a weight is pinned/overridden by hand (e.g. via `music add`),
+    # so the taste model leaves it alone.
+    taste_weight_auto: bool = True
+    # Listening signals refreshed by `sync` — observed inputs for the taste
+    # model; they do not, by themselves, set taste_weight.
+    spotify_top_tier: str | None = None  # long_term | medium_term | short_term
+    spotify_top_rank: int | None = None  # rank within that tier (0 = top)
+    last_played_at: datetime | None = None  # most recent play (recent-play window)
     status: TrackStatus = Field(default=TrackStatus.queued, index=True)
     added_at: datetime = Field(default_factory=_utcnow)
     extracted_at: datetime | None = None
+
+
+class TrackSource(SQLModel, table=True):
+    """A track's provenance. One track may have several rows (e.g. it is both
+    a saved track and present in two playlists). Used to seed Track.taste_weight.
+    """
+
+    __tablename__ = "track_sources"
+    __table_args__ = (
+        UniqueConstraint("track_id", "source_type", "source_ref", name="uq_track_source"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    track_id: str = Field(foreign_key="tracks.id", index=True)
+    source_type: SourceType
+    source_ref: str = ""  # playlist id; "" for saved/manual
+    source_name: str | None = None  # playlist name, for display
+    added_at: datetime = Field(default_factory=_utcnow)
 
 
 class Section(SQLModel, table=True):
