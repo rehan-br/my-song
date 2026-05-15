@@ -1,0 +1,36 @@
+# Data — gitignored entirely (invariant 3: no audio or feature files in git)
+/data/
+/logs/
+
+# Secrets
+.env
+*.spotify-token.json
+config/secrets*.yaml
+
+# Playwright MCP scratch
+.playwright-mcp/
+*.png
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.pyright/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+CLAUDE.md

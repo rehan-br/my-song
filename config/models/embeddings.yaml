@@ -1,0 +1,20 @@
+# Foundation model pins. Invariant 2 + determinism: never float these versions
+# silently — a change here must bump config_hash on every features row.
+mert:
+  repo: m-a-p/MERT-v1-330M
+  sample_rate: 24000
+  embedding_dim: 1024
+
+clap:
+  repo: laion/clap-htsat-fused
+  sample_rate: 48000
+
+lyrics_e5:
+  repo: intfloat/e5-large-v2
+
+demucs:
+  model: htdemucs_ft
+  stems: 4
+
+whisper:
+  repo: openai/whisper-medium

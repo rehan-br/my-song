@@ -1,0 +1,40 @@
+# Music Taste Engine — default configuration.
+# Override per-command with `--config path/to/override.yaml`.
+# All paths are relative to the project root unless absolute.
+
+project:
+  name: music-taste-engine
+  personal_use: true
+
+paths:
+  data: data
+  audio: data/audio
+  features: data/features
+  indexes: data/indexes
+  db: data/db/music.sqlite
+  logs: logs
+
+spotify:
+  # Keep scopes minimal — invariant: personal-use posture (CLAUDE.md).
+  scopes:
+    - user-library-read
+    - playlist-read-private
+  # Must exactly match a Redirect URI registered on the Spotify app.
+  # Spotify requires a loopback IP (127.0.0.1), not "localhost".
+  redirect_uri: "http://127.0.0.1:8080/callback"
+
+acquisition:
+  # Reject a yt-dlp match if its duration is off by more than this fraction.
+  duration_tolerance: 0.10
+  youtube:
+    audio_format: m4a
+    search_results: 5
+
+logging:
+  level: INFO
+  json_file: true
+
+extraction:
+  # Sample rates — invariant 8: MERT 24kHz, CLAP 48kHz. Do not mix.
+  target_sr_mert: 24000
+  target_sr_clap: 48000
