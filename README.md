@@ -1,8 +1,7 @@
 # Music Taste Engine
 
 A **personal** music recommendation system that tries to capture the *felt essence*
-of a listener's taste — not surface metadata. Research-first; see `CLAUDE.md` for the
-full design, hypothesis, and build plan.
+of a listener's taste — not surface metadata.
 
 > **Personal-use posture (invariant 5).** This is a personal research tool. No audio
 > is redistributed. Audio is cached locally in `data/` (gitignored) purely for
