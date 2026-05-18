@@ -33,20 +33,31 @@ class Recommendation:
     title: str
 
 
-def _sources_by_track(session: Session) -> dict[str, set[str]]:
-    """Map track_id -> set of its provenance source types."""
-    out: dict[str, set[str]] = {}
-    for ts in session.exec(select(TrackSource)).all():
-        out.setdefault(ts.track_id, set()).add(str(ts.source_type))
-    return out
+def split_pool(session: Session, track_ids: list[str]) -> tuple[list[str], list[str]]:
+    """Split track ids into ``(liked, crawl_candidates)`` by provenance.
+
+    A track is a *candidate* if its only provenance is ``crawl`` (discovered,
+    never in the user's library); everything else is *liked* and feeds the
+    taste centroid. Shared by the recommender and the eval harness so the
+    liked/candidate definition lives in one place.
+    """
+    sources: dict[str, set[str]] = {}
+    for track_source in session.exec(select(TrackSource)).all():
+        sources.setdefault(track_source.track_id, set()).add(str(track_source.source_type))
+    liked, candidates = [], []
+    for track_id in track_ids:
+        if sources.get(track_id) == {"crawl"}:
+            candidates.append(track_id)
+        else:
+            liked.append(track_id)
+    return liked, candidates
 
 
 def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recommendation]:
     """Rank candidates by M1 centroid fit and record a taste-model run.
 
-    The centroid is the user's liked tracks (non-``crawl`` provenance) weighted
-    by ``taste_weight``. Candidates are extracted ``crawl`` tracks if any exist,
-    else the whole library.
+    The centroid is the user's liked tracks weighted by ``taste_weight``.
+    Candidates are extracted ``crawl`` tracks if any exist, else the library.
     """
     store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
     if not store:
@@ -56,10 +67,7 @@ def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recomm
     matrix = np.stack([store[t].embedding for t in track_ids])
     index = {tid: i for i, tid in enumerate(track_ids)}
     tracks = {t.id: t for t in session.exec(select(Track).where(Track.id.in_(track_ids))).all()}
-    sources = _sources_by_track(session)
-
-    crawl_only = {t for t in track_ids if sources.get(t) == {"crawl"}}
-    liked_ids = [t for t in track_ids if t not in crawl_only]
+    liked_ids, crawl_ids = split_pool(session, track_ids)
     if not liked_ids:
         raise RuntimeError("no liked tracks to build a taste centroid from")
 
@@ -69,8 +77,8 @@ def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recomm
     model = CentroidModel().fit(matrix[liked_rows], liked_weights, space_mean)
 
     # Rank crawled candidates if we have any; otherwise rank the library.
-    discovery = bool(crawl_only)
-    candidate_ids = sorted(crawl_only) if discovery else track_ids
+    discovery = bool(crawl_ids)
+    candidate_ids = sorted(crawl_ids) if discovery else track_ids
     cand_rows = [index[t] for t in candidate_ids]
     scores = model.score(matrix[cand_rows])
     order = np.argsort(-scores)

@@ -346,16 +346,100 @@ def recommend(
     typer.secho(f"Top {len(recs)} by M1 centroid fit.", fg=typer.colors.GREEN)
 
 
+def _prompt_score(label: str) -> int:
+    """Prompt for a 1-5 rubric score, re-asking until valid."""
+    while True:
+        value = typer.prompt(f"  {label} [1-5]", type=int)
+        if 1 <= value <= 5:
+            return value
+        typer.echo("  please enter a number from 1 to 5")
+
+
 @app.command()
-def rate() -> None:
-    """[Phase 3] Interactive rating session."""
-    _phase_stub("rate", "Phase 3")
+def rate(
+    count: Annotated[int, typer.Option(help="Number of tracks to rate.")] = 15,
+) -> None:
+    """Blind listening session — rate tracks on the vibe / replay / skip rubric.
+
+    Each track's audio opens in your default player; rate it without seeing the
+    artist or title, so the rating reflects the sound, not the name.
+    """
+    import os
+
+    from eval import listening
+    from storage import db
+
+    cfg = _cfg()
+    audio_dir = paths.resolve(cfg.paths.audio)  # type: ignore[attr-defined]
+    rated = 0
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        tracks = listening.pick_session_tracks(session, count)
+        if not tracks:
+            typer.echo("No unrated extracted tracks — run `music extract` first.")
+            return
+        typer.echo(
+            f"Blind listening session — {len(tracks)} track(s). Rate 1-5; Ctrl-C to stop early."
+        )
+        for position, track in enumerate(tracks, start=1):
+            typer.secho(f"\n[{position}/{len(tracks)}] ▶ playing…", fg=typer.colors.CYAN)
+            audio = audio_dir / str(track.audio_path)
+            if hasattr(os, "startfile") and audio.exists():
+                try:
+                    os.startfile(audio)  # type: ignore[attr-defined]
+                except OSError as exc:
+                    log.warning("rate.play_failed", track_id=track.id, error=str(exc))
+            vibe = _prompt_score("vibe   (does it feel right?)")
+            replay = _prompt_score("replay (would you play it again?)")
+            skip = _prompt_score("skip   (urge to skip it?)")
+            notes = typer.prompt("  notes", default="", show_default=False).strip()
+            listening.record_rating(session, track.id, vibe, replay, skip, notes or None)
+            session.commit()
+            rated += 1
+    typer.secho(f"Recorded {rated} rating(s).", fg=typer.colors.GREEN)
 
 
 @app.command(name="eval")
-def run_eval() -> None:
-    """[Phase 3] Hold-out evaluation: recall@k, MAP."""
-    _phase_stub("eval", "Phase 3")
+def run_eval(
+    holdout: Annotated[float, typer.Option(help="Fraction of liked tracks held out.")] = 0.2,
+    k: Annotated[int, typer.Option(help="Cutoff for recall@k.")] = 20,
+    splits: Annotated[int, typer.Option(help="Random hold-out splits to average.")] = 5,
+) -> None:
+    """Hold-out evaluation of the M1 recommender — recall@k and MAP."""
+    from core.config import config_hash
+    from eval.holdout import evaluate_holdout
+    from recommend.rank import split_pool
+    from storage import db, vectors
+    from storage.schema import TasteModelRun
+
+    cfg = _cfg()
+    store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
+    if not store:
+        typer.echo("No MERT embeddings — run `music extract` first.")
+        return
+
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        liked_ids, candidate_ids = split_pool(session, sorted(store))
+        liked = {t: store[t].embedding for t in liked_ids}
+        candidates = {t: store[t].embedding for t in candidate_ids}
+        metrics = evaluate_holdout(liked, candidates, holdout_frac=holdout, k=k, n_splits=splits)
+        session.add(
+            TasteModelRun(
+                version="m1-centroid-eval",
+                config_hash=config_hash(cfg),
+                metrics_json=metrics,
+            )
+        )
+
+    typer.secho(
+        f"M1 hold-out eval — {splits} splits, holdout {holdout:.0%}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"  recall@{k} : {metrics['recall_at_k']:.3f}")
+    typer.echo(f"  MAP        : {metrics['map']:.3f}")
+    typer.echo(
+        f"  pool        : {int(metrics['n_liked'])} liked, "
+        f"{int(metrics['n_candidates'])} candidates"
+    )
 
 
 @app.command(name="ui")
