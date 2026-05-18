@@ -137,53 +137,74 @@ def add(query: Annotated[str, typer.Argument(help='"<artist> - <title>"')]) -> N
 
 @app.command()
 def download(
-    limit: Annotated[int, typer.Option(help="Max queued tracks to process.")] = 20,
+    limit: Annotated[int, typer.Option(help="Max queued tracks to process.")] = 100,
+    workers: Annotated[int, typer.Option(help="Parallel workers (0 = config default).")] = 0,
+    source: Annotated[
+        str | None, typer.Option(help="Only tracks of this provenance, e.g. 'crawl'.")
+    ] = None,
 ) -> None:
-    """Resolve and download audio for queued tracks via yt-dlp."""
+    """Resolve and download audio for queued tracks — in parallel via yt-dlp."""
     from sqlmodel import select
 
-    from acquisition import resolver
+    from acquisition import downloader
     from acquisition.youtube import YouTubeSource
     from storage import db
-    from storage.schema import Track, TrackStatus
+    from storage.schema import SourceType, Track, TrackSource, TrackStatus
 
     cfg = _cfg()
-    source = YouTubeSource(cfg)  # type: ignore[arg-type]
+    audio_source = YouTubeSource(cfg)  # type: ignore[arg-type]
     audio_dir = paths.resolve(cfg.paths.audio)  # type: ignore[attr-defined]
     tolerance = float(cfg.acquisition.duration_tolerance)  # type: ignore[attr-defined]
-    ok = failed = 0
+    n_workers = workers or int(cfg.acquisition.download_workers)  # type: ignore[attr-defined]
 
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-        queued = session.exec(
-            select(Track).where(Track.status == TrackStatus.queued).limit(limit)
-        ).all()
+        stmt = select(Track).where(Track.status == TrackStatus.queued)
+        if source:
+            stmt = stmt.join(TrackSource).where(
+                TrackSource.source_type == SourceType(source)
+            )
+        queued = session.exec(stmt.limit(limit)).all()
         if not queued:
             typer.echo("Nothing queued to download.")
             return
 
+        by_id = {t.id: t for t in queued}
+        jobs = [
+            (t.id, TrackRef(title=t.title, artist=t.artist, duration_ms=t.duration_ms))
+            for t in queued
+        ]
         for track in queued:
-            ref = TrackRef(title=track.title, artist=track.artist, duration_ms=track.duration_ms)
+            track.status = TrackStatus.downloading
+            session.add(track)
+        session.commit()
+
+        typer.echo(f"Downloading {len(jobs)} track(s) with {n_workers} workers…")
+        ok = failed = 0
+        for result in downloader.download_tracks(
+            audio_source, jobs, audio_dir, tolerance, n_workers
+        ):
+            track = by_id[result.track_id]
+            if result.ok:
+                track.youtube_id = result.youtube_id
+                track.audio_path = result.audio_path
+                track.status = TrackStatus.downloaded
+            else:
+                track.status = TrackStatus.failed
+                log.warning("download.failed", track_id=track.id, error=result.error)
             try:
-                track.status = TrackStatus.downloading
                 session.add(track)
                 session.commit()
-
-                best = resolver.pick_best_candidate(ref, source.search(ref), tolerance)
-                if best is None:
-                    raise RuntimeError("no candidate within duration tolerance")
-
-                path = source.fetch(best, audio_dir)
-                track.youtube_id = best.source_id
-                track.audio_path = str(path.relative_to(audio_dir))
-                track.status = TrackStatus.downloaded
-                ok += 1
-                log.info("download.ok", track_id=track.id, youtube_id=best.source_id)
             except Exception as exc:
+                # e.g. two tracks resolved to the same youtube_id — drop this one
+                session.rollback()
+                track.youtube_id = None
+                track.audio_path = None
                 track.status = TrackStatus.failed
-                failed += 1
-                log.warning("download.failed", track_id=track.id, error=str(exc))
-            session.add(track)
-            session.commit()
+                session.add(track)
+                session.commit()
+                log.warning("download.persist_failed", track_id=track.id, error=str(exc))
+            ok += int(track.status == TrackStatus.downloaded)
+            failed += int(track.status == TrackStatus.failed)
 
     color = typer.colors.GREEN if failed == 0 else typer.colors.YELLOW
     typer.secho(f"Downloaded {ok}, failed {failed}.", fg=color)
@@ -203,8 +224,12 @@ def extract(
     force: Annotated[
         bool, typer.Option(help="Re-extract even if already done / config changed.")
     ] = False,
+    fast: Annotated[
+        bool,
+        typer.Option(help="MERT only — skips CLAP + Librosa. Enough for `recommend`."),
+    ] = False,
 ) -> None:
-    """Run the feature-extraction pipeline (Phase 1: MERT full-song embeddings)."""
+    """Run the feature-extraction pipeline (MERT + CLAP + Librosa, or MERT-only)."""
     from sqlmodel import select
 
     from extraction import pipeline
@@ -225,10 +250,12 @@ def extract(
         if not tracks:
             typer.echo("No tracks to extract (need status=downloaded with audio).")
             return
+        models = "MERT" if fast else "MERT + CLAP"
         typer.echo(
-            f"Extracting {len(tracks)} track(s) — first run downloads MERT + CLAP models (~2GB)."
+            f"Extracting {len(tracks)} track(s)"
+            f"{' (fast: MERT only)' if fast else ''} — first run downloads {models}."
         )
-        result = pipeline.run_extraction(cfg, session, tracks, force=force)
+        result = pipeline.run_extraction(cfg, session, tracks, force=force, fast=fast)
 
     typer.secho(
         f"Extracted {result['ok']} track(s), {result['failed']} failed.",
@@ -243,9 +270,54 @@ def analyze() -> None:
 
 
 @app.command()
-def crawl() -> None:
-    """[Phase 2] Build the candidate pool via the artist/tag crawler."""
-    _phase_stub("crawl", "Phase 2")
+def crawl(
+    target: Annotated[int, typer.Option(help="Target number of candidate tracks.")] = 500,
+    depth: Annotated[int, typer.Option(help="Artist-graph BFS depth.")] = 2,
+    seeds: Annotated[int, typer.Option(help="Number of seed artists from the library.")] = 40,
+) -> None:
+    """Crawl the Last.fm artist graph for candidate tracks (Phase 2).
+
+    Seeds from your most-common library artists, walks the similar-artist
+    graph, and queues newly discovered tracks. Run `download` then `extract`
+    on them, then `recommend` ranks them against your taste centroid.
+    """
+    from collections import Counter
+
+    from sqlmodel import select
+
+    from acquisition import resolver
+    from acquisition.base import Provenance
+    from acquisition.lastfm import LastfmClient
+    from recommend.crawler.artist_graph import crawl_artist_graph
+    from storage import db
+    from storage.schema import Track
+
+    cfg = _cfg()
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        library = session.exec(select(Track)).all()
+        primary = [t.artist.split(",")[0].strip() for t in library if t.artist]
+        known = {a.lower() for a in primary}
+        seed_artists = [artist for artist, _ in Counter(primary).most_common(seeds)]
+        if not seed_artists:
+            typer.echo("No library artists to seed from — run `music sync` first.")
+            return
+
+        existing = {(t.artist.lower(), t.title.lower()) for t in library}
+        candidates = crawl_artist_graph(
+            LastfmClient(), seed_artists, depth=depth, known_artists=known, target=target
+        )
+        queued = 0
+        for ref in candidates:
+            if (ref.artist.lower(), ref.title.lower()) in existing:
+                continue
+            resolver.upsert_track(session, ref, Provenance("crawl"))
+            queued += 1
+
+    typer.secho(
+        f"Crawled {len(candidates)} candidates from {len(seed_artists)} seed artists "
+        f"— {queued} new tracks queued for download.",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()
@@ -255,9 +327,25 @@ def train() -> None:
 
 
 @app.command()
-def recommend() -> None:
-    """[Phase 2] Produce top-K recommendations."""
-    _phase_stub("recommend", "Phase 2")
+def recommend(
+    top: Annotated[int, typer.Option(help="Number of recommendations to show.")] = 20,
+) -> None:
+    """Rank tracks by fit to your taste centroid (M1 baseline).
+
+    The candidate pool is currently the extracted library itself — so this
+    surfaces your most on-taste tracks. External candidates arrive with the
+    crawler.
+    """
+    from recommend.rank import recommend as rank_tracks
+    from storage import db
+
+    cfg = _cfg()
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        recs = rank_tracks(cfg, session, top_k=top)
+
+    for rec in recs:
+        typer.echo(f"  {rec.rank:>2}. {rec.score:+.3f}  {rec.artist} — {rec.title}")
+    typer.secho(f"Top {len(recs)} by M1 centroid fit.", fg=typer.colors.GREEN)
 
 
 @app.command()

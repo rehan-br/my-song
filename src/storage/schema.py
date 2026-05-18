@@ -55,6 +55,7 @@ class SourceType(StrEnum):
     playlist = "playlist"  # a Spotify playlist — themed, weaker signal
     top = "top"  # a Spotify top track — strong affinity signal
     manual = "manual"  # explicitly added via `music add`
+    crawl = "crawl"  # discovered by the candidate crawler — not a taste signal
 
 
 class Track(SQLModel, table=True):

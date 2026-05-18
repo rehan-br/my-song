@@ -50,3 +50,25 @@ class LastfmClient:
             log.warning("lastfm.track_miss", artist=artist, title=title, error=str(exc))
             return []
         return [t.item.get_name().lower() for t in tags]
+
+    def similar_artists(self, artist: str, limit: int = 15) -> list[str]:
+        """Return artists similar to ``artist`` (most similar first).
+
+        The artist-graph crawler walks this relation (Spotify's related-artists
+        endpoint is 403 for our Development-mode app).
+        """
+        try:
+            similar = self._net.get_artist(artist).get_similar(limit=limit)
+        except pylast.WSError as exc:
+            log.warning("lastfm.similar_miss", artist=artist, error=str(exc))
+            return []
+        return [s.item.get_name() for s in similar]
+
+    def artist_top_track_titles(self, artist: str, limit: int = 10) -> list[str]:
+        """Return an artist's most-played track titles."""
+        try:
+            top = self._net.get_artist(artist).get_top_tracks(limit=limit)
+        except pylast.WSError as exc:
+            log.warning("lastfm.toptracks_miss", artist=artist, error=str(exc))
+            return []
+        return [t.item.get_title() for t in top]

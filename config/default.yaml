@@ -29,6 +29,7 @@ spotify:
 acquisition:
   # Reject a yt-dlp match if its duration is off by more than this fraction.
   duration_tolerance: 0.10
+  download_workers: 8   # parallel yt-dlp fetches (downloading is network-bound)
   youtube:
     audio_format: m4a
     search_results: 5
@@ -49,6 +50,8 @@ extraction:
   device: auto    # auto | cuda | cpu
   fp16: true      # mixed-precision inference on CUDA
   seed: 42        # determinism (invariant 7)
+  decode_workers: 4   # threads decoding audio ahead of the GPU
+  prefetch: 8         # decoded tracks kept buffered for the GPU
   mert:
     chunk_seconds: 5   # MERT was trained on ~5s clips; songs are chunked + pooled
     batch_size: 8      # ~1.5GB VRAM at fp16 (hardware notes)
