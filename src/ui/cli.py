@@ -160,9 +160,7 @@ def download(
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
         stmt = select(Track).where(Track.status == TrackStatus.queued)
         if source:
-            stmt = stmt.join(TrackSource).where(
-                TrackSource.source_type == SourceType(source)
-            )
+            stmt = stmt.join(TrackSource).where(TrackSource.source_type == SourceType(source))
         queued = session.exec(stmt.limit(limit)).all()
         if not queued:
             typer.echo("Nothing queued to download.")
@@ -362,8 +360,13 @@ def run_eval() -> None:
 
 @app.command(name="ui")
 def launch_ui() -> None:
-    """[Phase 2] Launch the Streamlit research dashboard."""
-    _phase_stub("ui", "Phase 2")
+    """Launch the Streamlit research dashboard."""
+    import subprocess
+    import sys
+
+    dashboard = paths.PROJECT_ROOT / "src" / "ui" / "dashboard.py"
+    typer.secho(f"Launching dashboard — {dashboard}", fg=typer.colors.GREEN)
+    subprocess.run([sys.executable, "-m", "streamlit", "run", str(dashboard)], check=False)
 
 
 def main() -> None:
