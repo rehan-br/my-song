@@ -1,13 +1,16 @@
 """Recommendation ranking — wires the taste model to the candidate pool.
 
-Phase 2 / M1: the centroid is fitted on the user's *liked* tracks (their
-library — any provenance except ``crawl``), and candidates are ranked by cosine
-fit. If the crawler has added candidates (``crawl`` provenance) that are
-extracted, those are what gets ranked — genuine discovery. With no crawled
-candidates yet, the library itself is ranked (the M1 sanity baseline).
+The centroid/contrastive model is fitted (or loaded) over the user's *liked*
+tracks (their library — any provenance except ``crawl``); candidates are then
+ranked by fit. If the crawler has added extracted ``crawl`` candidates, those
+are what gets ranked — genuine discovery — otherwise the library itself is
+ranked (the sanity baseline).
+
+Model selection: ``auto`` uses the trained M2 if a checkpoint exists, else M1.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from omegaconf import DictConfig
@@ -38,8 +41,7 @@ def split_pool(session: Session, track_ids: list[str]) -> tuple[list[str], list[
 
     A track is a *candidate* if its only provenance is ``crawl`` (discovered,
     never in the user's library); everything else is *liked* and feeds the
-    taste centroid. Shared by the recommender and the eval harness so the
-    liked/candidate definition lives in one place.
+    taste model. Shared by the recommender and the eval harness.
     """
     sources: dict[str, set[str]] = {}
     for track_source in session.exec(select(TrackSource)).all():
@@ -53,12 +55,40 @@ def split_pool(session: Session, track_ids: list[str]) -> tuple[list[str], list[
     return liked, candidates
 
 
-def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recommendation]:
-    """Rank candidates by M1 centroid fit and record a taste-model run.
+def _build_scorer(
+    cfg: DictConfig,
+    model: str,
+    matrix: np.ndarray,
+    index: dict[str, int],
+    liked_ids: list[str],
+    tracks: dict[str, Track],
+) -> tuple[str, Any]:
+    """Return ``(model_name, fitted_scorer)`` for the requested model.
 
-    The centroid is the user's liked tracks weighted by ``taste_weight``.
-    Candidates are extracted ``crawl`` tracks if any exist, else the library.
+    ``auto`` picks the trained M2 if its checkpoint exists, else M1.
     """
+    from taste_model.trainer import checkpoint_path
+
+    checkpoint = checkpoint_path(cfg)
+    want_m2 = model in ("contrastive", "m2") or (model == "auto" and checkpoint.exists())
+    if model in ("contrastive", "m2") and not checkpoint.exists():
+        raise RuntimeError("no trained M2 — run `music train` first")
+
+    if want_m2:
+        from taste_model.contrastive import ContrastiveModel
+
+        return "m2-contrastive", ContrastiveModel.load(checkpoint)
+
+    liked_rows = [index[t] for t in liked_ids]
+    weights = np.array([tracks[t].taste_weight if t in tracks else 1.0 for t in liked_ids])
+    centroid = CentroidModel().fit(matrix[liked_rows], weights, matrix.mean(axis=0))
+    return "m1-centroid", centroid
+
+
+def recommend(
+    cfg: DictConfig, session: Session, top_k: int = 20, model: str = "auto"
+) -> list[Recommendation]:
+    """Rank candidates by taste-model fit and record a taste-model run."""
     store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
     if not store:
         raise RuntimeError("no MERT embeddings found — run `music extract` first")
@@ -69,18 +99,14 @@ def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recomm
     tracks = {t.id: t for t in session.exec(select(Track).where(Track.id.in_(track_ids))).all()}
     liked_ids, crawl_ids = split_pool(session, track_ids)
     if not liked_ids:
-        raise RuntimeError("no liked tracks to build a taste centroid from")
+        raise RuntimeError("no liked tracks to build a taste model from")
 
-    liked_rows = [index[t] for t in liked_ids]
-    liked_weights = np.array([tracks[t].taste_weight if t in tracks else 1.0 for t in liked_ids])
-    space_mean = matrix.mean(axis=0)
-    model = CentroidModel().fit(matrix[liked_rows], liked_weights, space_mean)
+    model_name, scorer = _build_scorer(cfg, model, matrix, index, liked_ids, tracks)
 
     # Rank crawled candidates if we have any; otherwise rank the library.
     discovery = bool(crawl_ids)
     candidate_ids = sorted(crawl_ids) if discovery else track_ids
-    cand_rows = [index[t] for t in candidate_ids]
-    scores = model.score(matrix[cand_rows])
+    scores = scorer.score(matrix[[index[t] for t in candidate_ids]])
     order = np.argsort(-scores)
 
     recs: list[Recommendation] = []
@@ -99,7 +125,7 @@ def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recomm
 
     session.add(
         TasteModelRun(
-            version="m1-centroid",
+            version=model_name,
             config_hash=config_hash(cfg),
             metrics_json={
                 "mode": "discovery" if discovery else "library",
@@ -111,6 +137,7 @@ def recommend(cfg: DictConfig, session: Session, top_k: int = 20) -> list[Recomm
     )
     log.info(
         "recommend.done",
+        model=model_name,
         mode="discovery" if discovery else "library",
         liked=len(liked_ids),
         candidates=len(candidate_ids),

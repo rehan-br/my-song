@@ -319,31 +319,51 @@ def crawl(
 
 
 @app.command()
-def train() -> None:
-    """[Phase 2+] Train a taste model (centroid / contrastive / manifold)."""
-    _phase_stub("train", "Phase 2")
+def train(
+    model: Annotated[
+        str, typer.Option(help="centroid (M1) | contrastive (M2) | manifold (M3).")
+    ] = "contrastive",
+) -> None:
+    """Train a taste model. M2 (contrastive) learns per-dimension taste weights."""
+    cfg = _cfg()
+    if model in ("centroid", "m1"):
+        typer.echo("M1 (centroid) needs no training — use `recommend` / `eval`.")
+        return
+    if model in ("manifold", "m3"):
+        _phase_stub("train --model manifold", "Phase 4")
+    if model not in ("contrastive", "m2"):
+        typer.secho(f"Unknown model: {model}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+    from storage import db
+    from taste_model.trainer import train_contrastive
+
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        metrics = train_contrastive(cfg, session)
+    typer.secho(
+        f"Trained M2 — {int(metrics['n_positives'])} positives vs "
+        f"{int(metrics['n_negatives'])} negatives · final loss "
+        f"{metrics['final_loss']:.4f} · weight spread {metrics['scale_std']:.3f}.",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()
 def recommend(
     top: Annotated[int, typer.Option(help="Number of recommendations to show.")] = 20,
+    model: Annotated[str, typer.Option(help="auto | centroid (M1) | contrastive (M2).")] = "auto",
 ) -> None:
-    """Rank tracks by fit to your taste centroid (M1 baseline).
-
-    The candidate pool is currently the extracted library itself — so this
-    surfaces your most on-taste tracks. External candidates arrive with the
-    crawler.
-    """
+    """Rank tracks by taste-model fit. `auto` uses M2 if trained, else M1."""
     from recommend.rank import recommend as rank_tracks
     from storage import db
 
     cfg = _cfg()
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-        recs = rank_tracks(cfg, session, top_k=top)
+        recs = rank_tracks(cfg, session, top_k=top, model=model)
 
     for rec in recs:
         typer.echo(f"  {rec.rank:>2}. {rec.score:+.3f}  {rec.artist} — {rec.title}")
-    typer.secho(f"Top {len(recs)} by M1 centroid fit.", fg=typer.colors.GREEN)
+    typer.secho(f"Top {len(recs)} recommendations.", fg=typer.colors.GREEN)
 
 
 def _prompt_score(label: str) -> int:
@@ -403,13 +423,15 @@ def run_eval(
     holdout: Annotated[float, typer.Option(help="Fraction of liked tracks held out.")] = 0.2,
     k: Annotated[int, typer.Option(help="Cutoff for recall@k.")] = 20,
     splits: Annotated[int, typer.Option(help="Random hold-out splits to average.")] = 5,
+    model: Annotated[str, typer.Option(help="auto | centroid (M1) | contrastive (M2).")] = "auto",
 ) -> None:
-    """Hold-out evaluation of the M1 recommender — recall@k and MAP."""
+    """Hold-out evaluation of a taste model — recall@k and MAP."""
     from core.config import config_hash
     from eval.holdout import evaluate_holdout
     from recommend.rank import split_pool
     from storage import db, vectors
     from storage.schema import TasteModelRun
+    from taste_model.trainer import checkpoint_path
 
     cfg = _cfg()
     store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
@@ -417,21 +439,43 @@ def run_eval(
         typer.echo("No MERT embeddings — run `music extract` first.")
         return
 
+    use_m2 = model in ("contrastive", "m2") or (model == "auto" and checkpoint_path(cfg).exists())
+    label = "m2-contrastive" if use_m2 else "m1-centroid"
+    fit_fn = None
+    if use_m2:
+        from taste_model.contrastive import ContrastiveModel
+
+        m2 = cfg.taste.m2  # type: ignore[attr-defined]
+
+        def _fit(positives, negatives, space_mean):  # type: ignore[no-untyped-def]
+            return ContrastiveModel().fit(
+                positives,
+                negatives,
+                space_mean,
+                epochs=int(m2.epochs),
+                lr=float(m2.lr),
+                tau=float(m2.temperature),
+            )
+
+        fit_fn = _fit
+
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
         liked_ids, candidate_ids = split_pool(session, sorted(store))
         liked = {t: store[t].embedding for t in liked_ids}
         candidates = {t: store[t].embedding for t in candidate_ids}
-        metrics = evaluate_holdout(liked, candidates, holdout_frac=holdout, k=k, n_splits=splits)
+        metrics = evaluate_holdout(
+            liked, candidates, fit_fn=fit_fn, holdout_frac=holdout, k=k, n_splits=splits
+        )
         session.add(
             TasteModelRun(
-                version="m1-centroid-eval",
+                version=f"{label}-eval",
                 config_hash=config_hash(cfg),
                 metrics_json=metrics,
             )
         )
 
     typer.secho(
-        f"M1 hold-out eval — {splits} splits, holdout {holdout:.0%}",
+        f"{label} hold-out eval — {splits} splits, holdout {holdout:.0%}",
         fg=typer.colors.GREEN,
     )
     typer.echo(f"  recall@{k} : {metrics['recall_at_k']:.3f}")

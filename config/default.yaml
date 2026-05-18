@@ -39,6 +39,12 @@ acquisition:
 # observed data; how those translate into influence is owned by the taste
 # model + feedback loop (Phase 2+), not a hand-tuned formula here.
 
+taste:
+  m2:                  # M2 aspect-weighted contrastive model
+    epochs: 300        # InfoNCE optimisation steps
+    lr: 0.05
+    temperature: 0.1   # InfoNCE softmax temperature
+
 logging:
   level: INFO
   json_file: true
