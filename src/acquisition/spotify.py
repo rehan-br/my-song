@@ -36,6 +36,11 @@ def _track_to_ref(track: dict[str, Any]) -> TrackRef:
     )
 
 
+def _chunks(items: list[str], size: int) -> Iterator[list[str]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
 class SpotifyClient:
     """Authenticated Spotify client over the user's own library."""
 
@@ -149,3 +154,24 @@ class SpotifyClient:
             if track_id not in out or ts > out[track_id]:
                 out[track_id] = ts
         return out
+
+    def track_genres(self, track_ids: list[str]) -> dict[str, list[str]]:
+        """Map Spotify track id -> its primary artist's genres.
+
+        Genres are an artist-level field on Spotify; each track is labelled with
+        its first-listed artist's genres. Used to colour the sanity-check plots.
+        """
+        track_to_artist: dict[str, str] = {}
+        for batch in _chunks(track_ids, 50):
+            for track in self._sp.tracks(batch).get("tracks", []):
+                artists = (track or {}).get("artists") or []
+                if track and artists:
+                    track_to_artist[track["id"]] = artists[0]["id"]
+
+        artist_genres: dict[str, list[str]] = {}
+        for batch in _chunks(sorted(set(track_to_artist.values())), 50):
+            for artist in self._sp.artists(batch).get("artists", []):
+                if artist:
+                    artist_genres[artist["id"]] = artist.get("genres", [])
+
+        return {tid: artist_genres.get(aid, []) for tid, aid in track_to_artist.items()}

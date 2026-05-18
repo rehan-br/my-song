@@ -46,3 +46,12 @@ extraction:
   # Sample rates — invariant 8: MERT 24kHz, CLAP 48kHz. Do not mix.
   target_sr_mert: 24000
   target_sr_clap: 48000
+  device: auto    # auto | cuda | cpu
+  fp16: true      # mixed-precision inference on CUDA
+  seed: 42        # determinism (invariant 7)
+  mert:
+    chunk_seconds: 5   # MERT was trained on ~5s clips; songs are chunked + pooled
+    batch_size: 8      # ~1.5GB VRAM at fp16 (hardware notes)
+  clap:
+    chunk_seconds: 10  # CLAP windows; per-window embeddings are mean-pooled
+    batch_size: 16

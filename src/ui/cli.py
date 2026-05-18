@@ -195,9 +195,45 @@ def _phase_stub(name: str, phase: str) -> None:
 
 
 @app.command()
-def extract() -> None:
-    """[Phase 1] Run the feature-extraction pipeline."""
-    _phase_stub("extract", "Phase 1")
+def extract(
+    track: Annotated[
+        str | None, typer.Option(help="Extract one track by id (default: all downloaded).")
+    ] = None,
+    limit: Annotated[int, typer.Option(help="Max tracks to process (0 = no limit).")] = 0,
+    force: Annotated[
+        bool, typer.Option(help="Re-extract even if already done / config changed.")
+    ] = False,
+) -> None:
+    """Run the feature-extraction pipeline (Phase 1: MERT full-song embeddings)."""
+    from sqlmodel import select
+
+    from extraction import pipeline
+    from storage import db
+    from storage.schema import Track, TrackStatus
+
+    cfg = _cfg()
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        if track:
+            stmt = select(Track).where(Track.id == track)
+        else:
+            stmt = select(Track).where(Track.audio_path.is_not(None))
+            if not force:
+                stmt = stmt.where(Track.status == TrackStatus.downloaded)
+            if limit:
+                stmt = stmt.limit(limit)
+        tracks = list(session.exec(stmt).all())
+        if not tracks:
+            typer.echo("No tracks to extract (need status=downloaded with audio).")
+            return
+        typer.echo(
+            f"Extracting {len(tracks)} track(s) — first run downloads MERT + CLAP models (~2GB)."
+        )
+        result = pipeline.run_extraction(cfg, session, tracks, force=force)
+
+    typer.secho(
+        f"Extracted {result['ok']} track(s), {result['failed']} failed.",
+        fg=typer.colors.GREEN if result["failed"] == 0 else typer.colors.YELLOW,
+    )
 
 
 @app.command()
