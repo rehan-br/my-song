@@ -86,9 +86,16 @@ def _build_scorer(
 
 
 def recommend(
-    cfg: DictConfig, session: Session, top_k: int = 20, model: str = "auto"
+    cfg: DictConfig,
+    session: Session,
+    top_k: int = 20,
+    model: str = "auto",
+    composite: bool = False,
 ) -> list[Recommendation]:
-    """Rank candidates by taste-model fit and record a taste-model run."""
+    """Rank candidates by taste-model fit and record a taste-model run.
+
+    With ``composite``, the MERT taste score is blended with a CLAP fit score.
+    """
     store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
     if not store:
         raise RuntimeError("no MERT embeddings found — run `music extract` first")
@@ -107,6 +114,19 @@ def recommend(
     discovery = bool(crawl_ids)
     candidate_ids = sorted(crawl_ids) if discovery else track_ids
     scores = scorer.score(matrix[[index[t] for t in candidate_ids]])
+    if composite:
+        from recommend.composite import blend, clap_fit_scores
+
+        weights = cfg.taste.composite
+        clap_scores, has_clap = clap_fit_scores(cfg, liked_ids, candidate_ids)
+        scores = blend(
+            scores,
+            clap_scores,
+            has_clap,
+            float(weights.mert_weight),
+            float(weights.clap_weight),
+        )
+        model_name = f"{model_name}+clap"
     order = np.argsort(-scores)
 
     recs: list[Recommendation] = []

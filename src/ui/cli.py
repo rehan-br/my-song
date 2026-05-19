@@ -367,6 +367,9 @@ def train(
 def recommend(
     top: Annotated[int, typer.Option(help="Number of recommendations to show.")] = 20,
     model: Annotated[str, typer.Option(help="auto | centroid (M1) | contrastive (M2).")] = "auto",
+    composite: Annotated[
+        bool, typer.Option(help="Blend the MERT score with a CLAP fit score.")
+    ] = False,
 ) -> None:
     """Rank tracks by taste-model fit. `auto` uses M2 if trained, else M1."""
     from recommend.rank import recommend as rank_tracks
@@ -374,7 +377,7 @@ def recommend(
 
     cfg = _cfg()
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-        recs = rank_tracks(cfg, session, top_k=top, model=model)
+        recs = rank_tracks(cfg, session, top_k=top, model=model, composite=composite)
 
     for rec in recs:
         typer.echo(f"  {rec.rank:>2}. {rec.score:+.3f}  {rec.artist} — {rec.title}")

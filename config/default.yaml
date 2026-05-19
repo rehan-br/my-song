@@ -44,6 +44,9 @@ taste:
     epochs: 300        # InfoNCE optimisation steps
     lr: 0.05
     temperature: 0.1   # InfoNCE softmax temperature
+  composite:           # `recommend --composite` blend weights
+    mert_weight: 0.6
+    clap_weight: 0.4
 
 logging:
   level: INFO
