@@ -9,10 +9,10 @@ Three pages:
 Launch with ``uv run music ui``.
 """
 
-import random
 import time
 
 import streamlit as st
+import streamlit.components.v1 as components
 from sqlmodel import func, select
 
 from core.config import load_config
@@ -33,6 +33,88 @@ st.set_page_config(page_title="Music Taste Engine", page_icon="🎧", layout="wi
 @st.cache_resource
 def _config() -> object:
     return load_config()
+
+
+@st.cache_resource(show_spinner=False)
+def _spotify_client() -> object | None:
+    """A cached SpotifyClient, or None if credentials are unavailable."""
+    from acquisition.spotify import SpotifyAuthError, SpotifyClient
+
+    try:
+        return SpotifyClient(_config())  # type: ignore[arg-type]
+    except SpotifyAuthError:
+        return None
+
+
+@st.cache_data(show_spinner=False, ttl=1800)
+def _spotify_premium_token() -> str | None:
+    """A valid access token iff the account is Spotify Premium, else None.
+
+    Premium gates the Web Playback SDK. A missing or stale-scoped token (e.g.
+    before re-running ``music auth``) returns None — the page then degrades to
+    the Spotify deep link.
+    """
+    client = _spotify_client()
+    if client is None:
+        return None
+    try:
+        return client.access_token() if client.is_premium() else None
+    except Exception:  # noqa: BLE001 — best-effort; any failure → deep-link fallback
+        return None
+
+
+@st.cache_data(show_spinner=False)
+def _resolve_track_uri(
+    spotify_id: str | None, artist: str, title: str, duration_ms: int
+) -> str | None:
+    """The Spotify URI for a track — direct for library tracks, searched for
+    crawled ones (which carry no Spotify id)."""
+    if spotify_id:
+        return f"spotify:track:{spotify_id}"
+    client = _spotify_client()
+    if client is None:
+        return None
+    try:
+        return client.find_track_uri(artist, title, duration_ms)
+    except Exception:  # noqa: BLE001 — best-effort resolution; None → deep-link
+        return None
+
+
+def _spotify_player_html(token: str, track_uri: str) -> str:
+    """A self-contained Spotify Web Playback SDK player (one Play button)."""
+    template = """
+<div style="font-family:sans-serif;color:#ddd;">
+  <button id="play" style="padding:8px 20px;font-size:15px;border-radius:20px;
+    border:none;background:#1db954;color:#fff;cursor:pointer;">&#9654; Play full song</button>
+  <span id="status" style="margin-left:12px;color:#999;">loading&hellip;</span>
+</div>
+<script>
+window.onSpotifyWebPlaybackSDKReady = () => {
+  const token = "__TOKEN__", uri = "__URI__";
+  const status = document.getElementById('status');
+  let deviceId = null;
+  const player = new Spotify.Player({
+    name: 'Music Taste Engine', getOAuthToken: cb => cb(token), volume: 0.6});
+  player.addListener('ready', e => { deviceId = e.device_id; status.textContent = 'ready'; });
+  player.addListener('not_ready', () => { status.textContent = 'device offline'; });
+  player.addListener('account_error', () => { status.textContent = 'Spotify Premium required'; });
+  player.addListener('authentication_error', () => { status.textContent = 're-run music auth'; });
+  player.addListener('initialization_error', e => { status.textContent = e.message; });
+  player.connect();
+  document.getElementById('play').onclick = () => {
+    if (!deviceId) { status.textContent = 'still connecting\\u2026'; return; }
+    fetch('https://api.spotify.com/v1/me/player/play?device_id=' + deviceId, {
+      method: 'PUT', body: JSON.stringify({uris: [uri]}),
+      headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
+    }).then(r => {
+      status.textContent = r.ok ? '\\u266a playing' : 'play failed (' + r.status + ')';
+    });
+  };
+};
+</script>
+<script src="https://sdk.scdn.co/spotify-player.js"></script>
+"""
+    return template.replace("__TOKEN__", token).replace("__URI__", track_uri)
 
 
 # --- Recommendations -----------------------------------------------------
@@ -100,7 +182,6 @@ def rating_page() -> None:
             state["audit_tracks"] = [
                 {
                     "id": t.id,
-                    "youtube_id": t.youtube_id,
                     "spotify_id": t.spotify_id,
                     "duration_ms": t.duration_ms,
                     "title": t.title,
@@ -133,27 +214,31 @@ def rating_page() -> None:
 
     st.subheader(f"{track['artist']} — {track['title']}")
 
-    preview = st.toggle("Quick preview (random 10s)", key=f"prev_{pos}")
-    if track["youtube_id"]:
-        url = f"https://www.youtube.com/watch?v={track['youtube_id']}"
-        duration_ms = track["duration_ms"] or 0
-        if preview and duration_ms > 25_000:
-            start = state.setdefault(
-                f"prev_start_{pos}", random.randint(5, duration_ms // 1000 - 12)
-            )
-            st.video(url, start_time=start, end_time=start + 10)
-        else:
-            st.video(url)
-    else:
-        st.warning("No YouTube source for this track — nothing to play.")
+    # Premium users get full-song playback via the Web Playback SDK; everyone
+    # else opens the track in Spotify. Either way, playing it there is a real
+    # Spotify play, so `sync-history` later captures the true skip/completion.
+    duration_ms = track["duration_ms"] or 0
+    token = _spotify_premium_token()
+    uri = _resolve_track_uri(track["spotify_id"], track["artist"], track["title"], duration_ms)
+
+    if token and uri:
+        components.html(_spotify_player_html(token, uri), height=72)
+    elif not token:
+        st.info(
+            "🎧 **Spotify Premium?** Re-run `music auth` to grant playback and "
+            "full songs play right here. Otherwise, open the track in Spotify below."
+        )
+    else:  # Premium, but no confident Spotify match for this track
+        st.caption("Couldn't match this track on Spotify — use the link below.")
 
     if track["spotify_id"]:
-        st.link_button(
-            "Open in Spotify ↗", f"https://open.spotify.com/track/{track['spotify_id']}"
-        )
+        link = f"https://open.spotify.com/track/{track['spotify_id']}"
+    elif uri:
+        link = f"https://open.spotify.com/track/{uri.rsplit(':', 1)[-1]}"
     else:
         query = f"{track['artist']} {track['title']}".replace(" ", "%20")
-        st.link_button("Find on Spotify ↗", f"https://open.spotify.com/search/{query}")
+        link = f"https://open.spotify.com/search/{query}"
+    st.link_button("Open in Spotify ↗", link)
 
     st.divider()
     col_up, col_down, col_next = st.columns(3)
