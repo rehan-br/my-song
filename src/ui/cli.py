@@ -262,9 +262,31 @@ def extract(
 
 
 @app.command()
-def analyze() -> None:
-    """[Phase 4] Deep analysis: Demucs stems + Whisper lyrics."""
-    _phase_stub("analyze", "Phase 4")
+def analyze(
+    track_id: Annotated[str, typer.Argument(help="Track id to deep-analyze.")],
+    deep: Annotated[bool, typer.Option(help="Confirm the heavy Demucs + Whisper run.")] = False,
+) -> None:
+    """Deep analysis of one track — Demucs stems + Whisper lyrics (on-demand)."""
+    if not deep:
+        typer.echo("Deep analysis is heavy (Demucs + Whisper) — pass --deep to confirm.")
+        raise typer.Exit(code=1)
+
+    from extraction.analyze import analyze_track
+    from storage import db
+    from storage.schema import Track
+
+    cfg = _cfg()
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        track = session.get(Track, track_id)
+        if track is None:
+            typer.secho(f"No track with id {track_id}.", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+        result = analyze_track(cfg, session, track)
+    typer.secho(
+        f"Deep-analyzed — {result['stems']} stems separated, "
+        f"{result['lyric_chars']} lyric characters transcribed.",
+        fg=typer.colors.GREEN,
+    )
 
 
 @app.command()
@@ -345,7 +367,18 @@ def train(
         typer.echo("M1 (centroid) needs no training — use `recommend` / `eval`.")
         return
     if model in ("manifold", "m3"):
-        _phase_stub("train --model manifold", "Phase 4")
+        from storage import db
+        from taste_model.trainer import train_manifold
+
+        with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+            metrics = train_manifold(cfg, session)
+        typer.secho(
+            f"Trained M3 — VAE on {int(metrics['n_liked'])} liked tracks "
+            f"({int(metrics['n_sibling_pairs'])} sibling pairs) · "
+            f"final loss {metrics['final_loss']:.4f}.",
+            fg=typer.colors.GREEN,
+        )
+        return
     if model not in ("contrastive", "m2"):
         typer.secho(f"Unknown model: {model}", fg=typer.colors.RED)
         raise typer.Exit(code=1)
@@ -441,7 +474,7 @@ def run_eval(
     holdout: Annotated[float, typer.Option(help="Fraction of liked tracks held out.")] = 0.2,
     k: Annotated[int, typer.Option(help="Cutoff for recall@k.")] = 20,
     splits: Annotated[int, typer.Option(help="Random hold-out splits to average.")] = 5,
-    model: Annotated[str, typer.Option(help="auto | centroid (M1) | contrastive (M2).")] = "auto",
+    model: Annotated[str, typer.Option(help="auto | centroid | contrastive | manifold.")] = "auto",
 ) -> None:
     """Hold-out evaluation of a taste model — recall@k and MAP."""
     from core.config import config_hash
@@ -457,15 +490,32 @@ def run_eval(
         typer.echo("No MERT embeddings — run `music extract` first.")
         return
 
-    use_m2 = model in ("contrastive", "m2") or (model == "auto" and checkpoint_path(cfg).exists())
-    label = "m2-contrastive" if use_m2 else "m1-centroid"
     fit_fn = None
-    if use_m2:
+    if model in ("manifold", "m3"):
+        from taste_model.manifold import ManifoldModel
+
+        m3 = cfg.taste.m3  # type: ignore[attr-defined]
+        label = "m3-manifold"
+
+        def _fit_m3(positives, negatives, space_mean):  # type: ignore[no-untyped-def]  # noqa: ARG001
+            return ManifoldModel().fit(
+                positives,
+                space_mean,
+                latent_dim=int(m3.latent_dim),
+                hidden=int(m3.hidden),
+                epochs=int(m3.epochs),
+                lr=float(m3.lr),
+                beta=float(m3.beta),
+            )
+
+        fit_fn = _fit_m3
+    elif model in ("contrastive", "m2") or (model == "auto" and checkpoint_path(cfg).exists()):
         from taste_model.contrastive import ContrastiveModel
 
         m2 = cfg.taste.m2  # type: ignore[attr-defined]
+        label = "m2-contrastive"
 
-        def _fit(positives, negatives, space_mean):  # type: ignore[no-untyped-def]
+        def _fit_m2(positives, negatives, space_mean):  # type: ignore[no-untyped-def]
             return ContrastiveModel().fit(
                 positives,
                 negatives,
@@ -475,7 +525,9 @@ def run_eval(
                 tau=float(m2.temperature),
             )
 
-        fit_fn = _fit
+        fit_fn = _fit_m2
+    else:
+        label = "m1-centroid"
 
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
         liked_ids, candidate_ids = split_pool(session, sorted(store))

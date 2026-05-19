@@ -67,6 +67,15 @@ def _build_scorer(
 
     ``auto`` picks the trained M2 if its checkpoint exists, else M1.
     """
+    if model in ("manifold", "m3"):
+        from taste_model.manifold import ManifoldModel
+        from taste_model.trainer import m3_checkpoint_path
+
+        m3_ckpt = m3_checkpoint_path(cfg)
+        if not m3_ckpt.exists():
+            raise RuntimeError("no trained M3 — run `music train --model manifold` first")
+        return "m3-manifold", ManifoldModel.load(m3_ckpt)
+
     from taste_model.trainer import checkpoint_path
 
     checkpoint = checkpoint_path(cfg)

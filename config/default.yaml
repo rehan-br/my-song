@@ -47,6 +47,12 @@ taste:
   composite:           # `recommend --composite` blend weights
     mert_weight: 0.6
     clap_weight: 0.4
+  m3:                  # M3 manifold model (VAE over liked embeddings)
+    latent_dim: 16
+    hidden: 256
+    epochs: 400
+    lr: 0.001
+    beta: 0.001        # KL weight (beta-VAE — small, the data set is tiny)
 
 logging:
   level: INFO

@@ -1,8 +1,8 @@
 """Taste-model training — the ``music train`` orchestration.
 
 M1 (centroid) needs no training. M2 (contrastive) trains a per-dimension weight
-on positives (liked tracks) vs negatives (crawled candidates + tracks the user
-skipped, ``skip >= 4``).
+on positives (liked) vs negatives (crawled + skipped) tracks. M3 (manifold)
+trains a VAE on the liked-track embedding distribution.
 """
 
 from pathlib import Path
@@ -16,15 +16,20 @@ from core.config import config_hash
 from core.logging import get_logger
 from recommend.rank import split_pool
 from storage import vectors
-from storage.schema import Rating, TasteModelRun
+from storage.schema import EssenceSibling, Rating, TasteModelRun
 from taste_model.contrastive import ContrastiveModel
 
 log = get_logger("trainer")
 
 
 def checkpoint_path(cfg: DictConfig) -> Path:
-    """Where the trained M2 weight checkpoint lives."""
+    """Where the trained M2 (contrastive) weight checkpoint lives."""
     return paths.resolve(cfg.paths.data) / "models" / "m2.npz"
+
+
+def m3_checkpoint_path(cfg: DictConfig) -> Path:
+    """Where the trained M3 (manifold VAE) checkpoint lives."""
+    return paths.resolve(cfg.paths.data) / "models" / "m3.pt"
 
 
 def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:
@@ -78,4 +83,61 @@ def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:
         )
     )
     log.info("train.m2.done", **metrics)
+    return metrics
+
+
+def train_manifold(cfg: DictConfig, session: Session) -> dict[str, float]:
+    """Train M3 — a VAE over the liked-track embedding distribution."""
+    from taste_model.manifold import ManifoldModel
+
+    store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
+    if not store:
+        raise RuntimeError("no MERT embeddings — run `music extract` first")
+
+    track_ids = sorted(store)
+    liked_ids, _crawl = split_pool(session, track_ids)
+    if not liked_ids:
+        raise RuntimeError("no liked tracks to train on")
+
+    liked = np.stack([store[t].embedding for t in liked_ids])
+    space_mean = np.stack([store[t].embedding for t in track_ids]).mean(axis=0)
+
+    # essence_siblings -> index pairs within the liked array (extra supervision).
+    index = {tid: i for i, tid in enumerate(liked_ids)}
+    sibling_pairs = [
+        (index[s.track_a], index[s.track_b])
+        for s in session.exec(select(EssenceSibling)).all()
+        if s.track_a in index and s.track_b in index
+    ]
+
+    m3 = cfg.taste.m3
+    model = ManifoldModel().fit(
+        liked,
+        space_mean,
+        latent_dim=int(m3.latent_dim),
+        hidden=int(m3.hidden),
+        epochs=int(m3.epochs),
+        lr=float(m3.lr),
+        beta=float(m3.beta),
+        sibling_pairs=sibling_pairs,
+    )
+
+    checkpoint = m3_checkpoint_path(cfg)
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    model.save(checkpoint)
+
+    metrics = {
+        "n_liked": float(len(liked_ids)),
+        "n_sibling_pairs": float(len(sibling_pairs)),
+        "final_loss": model.final_loss,
+    }
+    session.add(
+        TasteModelRun(
+            version="m3-manifold",
+            config_hash=config_hash(cfg),
+            checkpoint_path=str(checkpoint),
+            metrics_json=metrics,
+        )
+    )
+    log.info("train.m3.done", **metrics)
     return metrics

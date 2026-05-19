@@ -105,6 +105,11 @@ def section_embedding_path(cfg: DictConfig, track_id: str) -> Path:
     return embeddings_dir(cfg) / "mert_sections" / f"{track_id}.parquet"
 
 
+def stem_embedding_path(cfg: DictConfig, track_id: str) -> Path:
+    """Path of a track's per-stem MERT embedding shard (Demucs `--deep` path)."""
+    return embeddings_dir(cfg) / "mert_stems" / f"{track_id}.parquet"
+
+
 _SECTION_SCHEMA = pa.schema(
     [
         ("section_index", pa.int32()),
