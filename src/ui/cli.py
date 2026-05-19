@@ -273,11 +273,12 @@ def crawl(
     depth: Annotated[int, typer.Option(help="Artist-graph BFS depth.")] = 2,
     seeds: Annotated[int, typer.Option(help="Number of seed artists from the library.")] = 40,
 ) -> None:
-    """Crawl the Last.fm artist graph for candidate tracks (Phase 2).
+    """Crawl Last.fm for candidate tracks — 80% artist-graph, 20% tag-graph.
 
-    Seeds from your most-common library artists, walks the similar-artist
-    graph, and queues newly discovered tracks. Run `download` then `extract`
-    on them, then `recommend` ranks them against your taste centroid.
+    Seeds from your most-common library artists: an artist-similarity BFS finds
+    music *near* your taste, a tag walk adds a serendipity stream, and the two
+    are mixed ~80/20. Run `download` then `extract` on the queued tracks; then
+    `recommend` ranks them.
     """
     from collections import Counter
 
@@ -287,6 +288,8 @@ def crawl(
     from acquisition.base import Provenance
     from acquisition.lastfm import LastfmClient
     from recommend.crawler.artist_graph import crawl_artist_graph
+    from recommend.crawler.sampler import mix
+    from recommend.crawler.tag_graph import crawl_tag_graph
     from storage import db
     from storage.schema import Track
 
@@ -300,10 +303,21 @@ def crawl(
             typer.echo("No library artists to seed from — run `music sync` first.")
             return
 
-        existing = {(t.artist.lower(), t.title.lower()) for t in library}
-        candidates = crawl_artist_graph(
-            LastfmClient(), seed_artists, depth=depth, known_artists=known, target=target
+        client = LastfmClient()
+        artist_pool = crawl_artist_graph(
+            client, seed_artists, depth=depth, known_artists=known, target=target
         )
+        reachable = {ref.artist.lower() for ref in artist_pool}
+        tag_pool = crawl_tag_graph(
+            client,
+            seed_artists,
+            known_artists=known,
+            reachable_artists=reachable,
+            target=round(target * 0.3),
+        )
+        candidates = mix(artist_pool, tag_pool, target, artist_frac=0.8)
+
+        existing = {(t.artist.lower(), t.title.lower()) for t in library}
         queued = 0
         for ref in candidates:
             if (ref.artist.lower(), ref.title.lower()) in existing:
@@ -312,7 +326,8 @@ def crawl(
             queued += 1
 
     typer.secho(
-        f"Crawled {len(candidates)} candidates from {len(seed_artists)} seed artists "
+        f"Crawled {len(candidates)} candidates "
+        f"({len(artist_pool)} artist-graph, {len(tag_pool)} tag-graph) "
         f"— {queued} new tracks queued for download.",
         fg=typer.colors.GREEN,
     )

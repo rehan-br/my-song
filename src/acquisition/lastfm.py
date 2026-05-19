@@ -72,3 +72,16 @@ class LastfmClient:
             log.warning("lastfm.toptracks_miss", artist=artist, error=str(exc))
             return []
         return [t.item.get_title() for t in top]
+
+    def tag_top_tracks(self, tag: str, limit: int = 20) -> list[tuple[str, str]]:
+        """Return ``(artist, title)`` pairs for a tag's most-played tracks.
+
+        Used by the tag-graph crawler — its serendipity stream pulls tracks that
+        share a vibe with the library but aren't near it in the artist graph.
+        """
+        try:
+            top = self._net.get_tag(tag).get_top_tracks(limit=limit)
+        except pylast.WSError as exc:
+            log.warning("lastfm.tag_miss", tag=tag, error=str(exc))
+            return []
+        return [(item.item.get_artist().get_name(), item.item.get_title()) for item in top]
