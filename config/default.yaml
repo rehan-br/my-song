@@ -53,6 +53,9 @@ taste:
     epochs: 400
     lr: 0.001
     beta: 0.001        # KL weight (beta-VAE — small, the data set is tiny)
+  engagement:          # automatic taste_weight from silent listening signals
+    prior_strength: 3.0  # pseudo-observations anchoring weight at 1.0 — a
+                         # generic regulariser, NOT tuned to any one user
 
 logging:
   level: INFO

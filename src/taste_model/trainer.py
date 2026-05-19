@@ -16,7 +16,7 @@ from core.config import config_hash
 from core.logging import get_logger
 from recommend.rank import split_pool
 from storage import vectors
-from storage.schema import EssenceSibling, Rating, TasteModelRun
+from storage.schema import EssenceSibling, Rating, TasteModelRun, Track
 from taste_model.contrastive import ContrastiveModel
 
 log = get_logger("trainer")
@@ -52,11 +52,21 @@ def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:
         raise RuntimeError("no negatives — crawl candidates (`music crawl`) or rate tracks first")
 
     space_mean = np.stack([store[t].embedding for t in track_ids]).mean(axis=0)
+
+    # Engagement-derived taste weights tilt the centroid toward tracks the user
+    # actually completes/replays — set by `sync-history`, uniform 1.0 until then.
+    weight_by_id = {
+        track.id: track.taste_weight
+        for track in session.exec(select(Track).where(Track.id.in_(positive_ids))).all()  # type: ignore[attr-defined]
+    }
+    positive_weights = np.array([weight_by_id.get(t, 1.0) for t in positive_ids])
+
     m2 = cfg.taste.m2
     model = ContrastiveModel().fit(
         np.stack([store[t].embedding for t in positive_ids]),
         np.stack([store[t].embedding for t in negative_ids]),
         space_mean,
+        positive_weights=positive_weights,
         epochs=int(m2.epochs),
         lr=float(m2.lr),
         tau=float(m2.temperature),
@@ -70,6 +80,7 @@ def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:
     metrics = {
         "n_positives": float(len(positive_ids)),
         "n_negatives": float(len(negative_ids)),
+        "mean_positive_weight": float(positive_weights.mean()),
         "final_loss": model.final_loss,
         "scale_mean": float(model.scale.mean()),
         "scale_std": float(model.scale.std()),

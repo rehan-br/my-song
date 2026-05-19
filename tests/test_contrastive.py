@@ -32,6 +32,30 @@ def test_fit_requires_positives_and_negatives() -> None:
         ContrastiveModel().fit(np.ones((2, 3)), np.empty((0, 3)))
 
 
+def test_positive_weights_tilt_the_centroid() -> None:
+    # two positive clusters; near-zero-weighting one should pull the taste
+    # centroid toward the other, so that cluster scores higher.
+    rng = np.random.default_rng(2)
+    cluster_a = np.array([1.0, 0.0, 0.0]) + 0.02 * rng.standard_normal((10, 3))
+    cluster_b = np.array([0.0, 1.0, 0.0]) + 0.02 * rng.standard_normal((10, 3))
+    positives = np.vstack([cluster_a, cluster_b])
+    negatives = np.array([0.0, 0.0, 1.0]) + 0.02 * rng.standard_normal((20, 3))
+    weights = np.concatenate([np.ones(10), np.full(10, 1e-6)])  # all but ignore B
+
+    model = ContrastiveModel().fit(
+        positives, negatives, np.zeros(3), positive_weights=weights, epochs=200
+    )
+
+    assert model.score(cluster_a).mean() > model.score(cluster_b).mean()
+
+
+def test_positive_weights_length_mismatch_raises() -> None:
+    with pytest.raises(ValueError):
+        ContrastiveModel().fit(
+            np.ones((3, 2)), np.ones((2, 2)), np.zeros(2), positive_weights=np.ones(2)
+        )
+
+
 def test_save_load_roundtrip(tmp_path) -> None:
     rng = np.random.default_rng(1)
     positives = rng.standard_normal((10, 4))

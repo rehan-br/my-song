@@ -121,6 +121,7 @@ def sync_history() -> None:
     from acquisition.spotify import SpotifyClient
     from storage import db
     from storage.schema import EventType
+    from taste_model import engagement
 
     cfg = _cfg()
     client = SpotifyClient(cfg)  # type: ignore[arg-type]
@@ -128,13 +129,22 @@ def sync_history() -> None:
     events = infer_events(plays)
     with db.session_scope(cfg) as session:  # type: ignore[arg-type]
         written = ingest_events(session, events, source="spotify")
+        reweighted = engagement.refresh_engagement_weights(session, cfg)  # type: ignore[arg-type]
 
     skips = sum(e.event_type == EventType.skip for e in events)
     completes = sum(e.event_type == EventType.complete for e in events)
-    log.info("sync_history.done", plays=len(plays), new=written, skips=skips, completes=completes)
+    log.info(
+        "sync_history.done",
+        plays=len(plays),
+        new=written,
+        skips=skips,
+        completes=completes,
+        reweighted=reweighted,
+    )
     typer.secho(
         f"Synced {len(plays)} recent plays — {written} new events "
-        f"({completes} completed, {skips} skipped).",
+        f"({completes} completed, {skips} skipped). "
+        f"Engagement weight updated on {reweighted} track(s).",
         fg=typer.colors.GREEN,
     )
 

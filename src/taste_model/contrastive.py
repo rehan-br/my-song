@@ -43,12 +43,18 @@ class ContrastiveModel:
         negatives: np.ndarray,
         space_mean: np.ndarray | None = None,
         *,
+        positive_weights: np.ndarray | None = None,
         epochs: int = 300,
         lr: float = 0.05,
         tau: float = 0.1,
         seed: int = 42,
     ) -> "ContrastiveModel":
-        """Train the per-dimension weight by InfoNCE on positives vs negatives."""
+        """Train the per-dimension weight by InfoNCE on positives vs negatives.
+
+        ``positive_weights`` (one per positive — e.g. engagement-derived taste
+        weights) tilt the taste centroid toward the tracks the user actually
+        engages with. Uniform or omitted weights reduce to the plain mean.
+        """
         import torch
         import torch.nn.functional as torch_fn
 
@@ -66,7 +72,16 @@ class ContrastiveModel:
         )
         zp = torch.tensor(positives - self.space_mean)
         zn = torch.tensor(negatives - self.space_mean)
-        centroid = zp.mean(dim=0)  # taste direction — fixed during training
+        # taste direction — fixed during training; engagement-weighted if asked.
+        if positive_weights is None:
+            centroid = zp.mean(dim=0)
+        else:
+            weights = np.asarray(positive_weights, dtype=np.float64)
+            if weights.shape != (len(positives),):
+                raise ValueError("positive_weights must give one weight per positive")
+            total = weights.sum()
+            weights = weights / total if total > 0 else np.full(len(weights), 1.0 / len(weights))
+            centroid = (zp * torch.tensor(weights)[:, None]).sum(dim=0)
 
         torch.manual_seed(seed)
         raw = torch.zeros(positives.shape[1], dtype=torch.float64, requires_grad=True)
