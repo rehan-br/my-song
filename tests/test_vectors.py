@@ -2,7 +2,13 @@
 
 import numpy as np
 
-from storage.vectors import EmbeddingRow, read_embeddings, write_embeddings
+from storage.vectors import (
+    EmbeddingRow,
+    read_embeddings,
+    read_section_embeddings,
+    write_embeddings,
+    write_section_embeddings,
+)
 
 
 def test_write_then_read_roundtrip(tmp_path) -> None:
@@ -31,3 +37,18 @@ def test_write_overwrites_whole_shard(tmp_path) -> None:
     write_embeddings(path, [EmbeddingRow("t1", np.zeros(2, np.float32), "m", "h1")])
     write_embeddings(path, [EmbeddingRow("t2", np.zeros(2, np.float32), "m", "h2")])
     assert set(read_embeddings(path)) == {"t2"}
+
+
+def test_section_embeddings_roundtrip(tmp_path) -> None:
+    path = tmp_path / "mert_sections" / "track1.parquet"
+    sections = [np.array([1, 2], dtype=np.float32), np.array([3, 4], dtype=np.float32)]
+    assert write_section_embeddings(path, sections, "mert", "h1") == 2
+
+    loaded = read_section_embeddings(path)
+    assert len(loaded) == 2
+    np.testing.assert_array_equal(loaded[0], [1, 2])
+    np.testing.assert_array_equal(loaded[1], [3, 4])
+
+
+def test_read_section_embeddings_missing(tmp_path) -> None:
+    assert read_section_embeddings(tmp_path / "absent.parquet") == []

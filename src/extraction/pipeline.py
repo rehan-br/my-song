@@ -1,9 +1,9 @@
 """End-to-end feature extraction.
 
-Per track: MERT full-song embedding, and — unless ``fast`` — a CLAP embedding
-plus Librosa interpretable features. ``fast`` mode runs **MERT only**: that is
-all the M1 recommender ranks on, it roughly halves extraction time, and CLAP /
-Librosa can be backfilled later with a normal run.
+Per track: MERT full-song embedding, and — unless ``fast`` — a CLAP embedding,
+Librosa interpretable features, structure segmentation and per-section MERT.
+``fast`` mode runs **MERT only**: that is all the M1 recommender ranks on, it
+roughly halves extraction time, and the rest can be backfilled with a normal run.
 
 Audio decoding runs on a thread pool that reads *ahead* of the GPU (see
 ``_prefetch``), so MERT/CLAP inference is never blocked waiting on ffmpeg —
@@ -18,13 +18,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from omegaconf import DictConfig
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from core import paths
 from core.config import config_hash
 from core.logging import get_logger
 from storage import vectors
-from storage.schema import FeaturesInterpretable, Track, TrackStatus
+from storage.schema import FeaturesInterpretable, Section, SectionKind, Track, TrackStatus
 
 log = get_logger("pipeline")
 
@@ -66,6 +66,22 @@ def _upsert_features(
     session.add(row)
 
 
+def _replace_sections(session: Session, track_id: str, spans: list[tuple[float, float]]) -> None:
+    """Replace a track's section rows with freshly segmented spans."""
+    for old in session.exec(select(Section).where(Section.track_id == track_id)).all():
+        session.delete(old)
+    for index, (start, end) in enumerate(spans):
+        session.add(
+            Section(
+                track_id=track_id,
+                index=index,
+                kind=SectionKind.other,
+                start_s=start,
+                end_s=end,
+            )
+        )
+
+
 def run_extraction(
     cfg: DictConfig,
     session: Session,
@@ -81,6 +97,7 @@ def run_extraction(
     from extraction.audio import load_audio
     from extraction.embeddings.mert import MertEmbedder
     from extraction.interpretable.librosa_extract import extract_interpretable
+    from extraction.segmentation import segment_track
 
     chash = config_hash(cfg)
     audio_root = paths.resolve(cfg.paths.audio)
@@ -163,6 +180,20 @@ def run_extraction(
                         config_hash=chash,
                     )
                     clap_changed = True
+
+                    # Structure segmentation + per-section MERT embeddings.
+                    spans = segment_track(wav_mert, sr_mert)
+                    _replace_sections(session, track.id, spans)
+                    section_vectors = [
+                        mert.embed_song(wav_mert[int(s * sr_mert) : int(e * sr_mert)])
+                        for s, e in spans
+                    ]
+                    vectors.write_section_embeddings(
+                        vectors.section_embedding_path(cfg, track.id),
+                        section_vectors,
+                        mert_repo,
+                        chash,
+                    )
                 track.status = TrackStatus.extracted
                 track.extracted_at = datetime.now(UTC)
                 session.add(track)

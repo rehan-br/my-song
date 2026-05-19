@@ -98,3 +98,46 @@ def write_embeddings(path: Path, rows: Iterable[EmbeddingRow]) -> int:
     )
     pq.write_table(table, path)
     return len(rows)
+
+
+def section_embedding_path(cfg: DictConfig, track_id: str) -> Path:
+    """Path of a track's per-section MERT embedding shard."""
+    return embeddings_dir(cfg) / "mert_sections" / f"{track_id}.parquet"
+
+
+_SECTION_SCHEMA = pa.schema(
+    [
+        ("section_index", pa.int32()),
+        ("model", pa.string()),
+        ("config_hash", pa.string()),
+        ("dim", pa.int32()),
+        ("embedding", pa.list_(pa.float32())),
+    ]
+)
+
+
+def write_section_embeddings(
+    path: Path, embeddings: list[np.ndarray], model: str, config_hash: str
+) -> int:
+    """Write a track's per-section embeddings — one row per section, in order."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.table(
+        {
+            "section_index": list(range(len(embeddings))),
+            "model": [model] * len(embeddings),
+            "config_hash": [config_hash] * len(embeddings),
+            "dim": [int(len(e)) for e in embeddings],
+            "embedding": [np.asarray(e, dtype=np.float32) for e in embeddings],
+        },
+        schema=_SECTION_SCHEMA,
+    )
+    pq.write_table(table, path)
+    return len(embeddings)
+
+
+def read_section_embeddings(path: Path) -> list[np.ndarray]:
+    """Load a track's per-section embeddings, ordered by section index."""
+    if not path.exists():
+        return []
+    table = pq.read_table(path).sort_by("section_index")
+    return [np.asarray(r["embedding"], dtype=np.float32) for r in table.to_pylist()]
