@@ -90,7 +90,9 @@ def rating_page() -> None:
     if "rate_tracks" not in state:
         with db.session_scope(cfg) as session:  # type: ignore[arg-type]
             picked = listening.pick_session_tracks(session, count=20)
-        state["rate_tracks"] = [(t.id, t.audio_path) for t in picked]
+            # read attributes while the session is still open — the Track
+            # objects detach once the scope commits and closes.
+            state["rate_tracks"] = [(t.id, t.audio_path) for t in picked]
         state["rate_pos"] = 0
 
     tracks = state["rate_tracks"]
