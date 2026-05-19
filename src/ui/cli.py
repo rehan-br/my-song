@@ -109,6 +109,36 @@ def sync() -> None:
     )
 
 
+@app.command(name="sync-history")
+def sync_history() -> None:
+    """Sync silent listening signals from Spotify recently-played.
+
+    Pulls the recent-plays window, infers skip/complete from inter-play gaps,
+    and appends new rows to ``listening_events``. Run regularly — the window is
+    shallow (~50 plays), so behavioural history accumulates across calls.
+    """
+    from acquisition.events import infer_events, ingest_events
+    from acquisition.spotify import SpotifyClient
+    from storage import db
+    from storage.schema import EventType
+
+    cfg = _cfg()
+    client = SpotifyClient(cfg)  # type: ignore[arg-type]
+    plays = client.iter_recent_plays()
+    events = infer_events(plays)
+    with db.session_scope(cfg) as session:  # type: ignore[arg-type]
+        written = ingest_events(session, events, source="spotify")
+
+    skips = sum(e.event_type == EventType.skip for e in events)
+    completes = sum(e.event_type == EventType.complete for e in events)
+    log.info("sync_history.done", plays=len(plays), new=written, skips=skips, completes=completes)
+    typer.secho(
+        f"Synced {len(plays)} recent plays — {written} new events "
+        f"({completes} completed, {skips} skipped).",
+        fg=typer.colors.GREEN,
+    )
+
+
 @app.command()
 def add(query: Annotated[str, typer.Argument(help='"<artist> - <title>"')]) -> None:
     """Add a track manually — an explicit taste signal.

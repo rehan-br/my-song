@@ -15,6 +15,7 @@ from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyOAuth
 
 from acquisition.base import Provenance, TrackRef
+from acquisition.events import RecentPlay
 from core import paths
 from core.logging import get_logger
 
@@ -154,6 +155,32 @@ class SpotifyClient:
             if track_id not in out or ts > out[track_id]:
                 out[track_id] = ts
         return out
+
+    def iter_recent_plays(self) -> list[RecentPlay]:
+        """Return recently-played items, newest-first, for silent-signal ingestion.
+
+        The window is shallow (~50 plays); call regularly so history accumulates
+        across syncs. Skip/complete is inferred downstream — see
+        ``acquisition.events.infer_events``.
+        """
+        page = self._sp.current_user_recently_played(limit=50)
+        plays: list[RecentPlay] = []
+        for item in page.get("items", []):
+            track = item.get("track") or {}
+            played_at = item.get("played_at")
+            if not track.get("id") or not played_at:
+                continue
+            ts = datetime.fromisoformat(played_at.replace("Z", "+00:00"))
+            ts = ts.astimezone(UTC).replace(tzinfo=None)
+            plays.append(
+                RecentPlay(
+                    spotify_id=track["id"],
+                    duration_ms=track.get("duration_ms") or 0,
+                    played_at=ts,
+                    context=(item.get("context") or {}).get("type"),
+                )
+            )
+        return plays
 
     def track_genres(self, track_ids: list[str]) -> dict[str, list[str]]:
         """Map Spotify track id -> its primary artist's genres.

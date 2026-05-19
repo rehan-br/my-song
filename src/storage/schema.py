@@ -58,6 +58,15 @@ class SourceType(StrEnum):
     crawl = "crawl"  # discovered by the candidate crawler — not a taste signal
 
 
+class EventType(StrEnum):
+    """A passive listening signal — see :class:`ListeningEvent`."""
+
+    play = "play"  # played; completion unknown
+    complete = "complete"  # played through to (near) the end
+    skip = "skip"  # abandoned before finishing
+    preview = "preview"  # short audition in the local UI
+
+
 class Track(SQLModel, table=True):
     """One resolved track. External IDs are nullable and individually unique."""
 
@@ -172,6 +181,32 @@ class Rating(SQLModel, table=True):
     replay: int = Field(ge=1, le=5)
     skip: int = Field(ge=1, le=5)
     notes: str | None = None
+
+
+class ListeningEvent(SQLModel, table=True):
+    """One passive listening signal — the silent-signal feed for engagement.
+
+    Synced from Spotify recently-played (``source='spotify'``) or captured by the
+    local player (``source='local'``). For Spotify plays, skip vs. complete is
+    *inferred* from the gap to the following play — see ``acquisition.events``.
+    This is behavioural data, deliberately kept separate from the explicit
+    ``Rating`` rubric: revealed preference, not self-report.
+    """
+
+    __tablename__ = "listening_events"
+    __table_args__ = (
+        UniqueConstraint("track_id", "occurred_at", "source", name="uq_listening_event"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    track_id: str = Field(foreign_key="tracks.id", index=True)
+    event_type: EventType
+    occurred_at: datetime = Field(index=True)  # when the listen happened
+    position_ms: int | None = None  # how far playback reached
+    completion: float | None = Field(default=None, ge=0.0, le=1.0)  # position / duration
+    source: str = "spotify"  # spotify | local
+    context: str | None = None  # playlist | album | artist | search
+    ingested_at: datetime = Field(default_factory=_utcnow)
 
 
 class EssenceSibling(SQLModel, table=True):
