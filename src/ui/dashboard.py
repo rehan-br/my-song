@@ -2,17 +2,19 @@
 
 Three pages:
 - **Recommendations** — runs the taste model (M1 or M2) and shows the ranked list.
-- **Rate** — blind listening session: plays a track, captures the vibe/replay/
-  skip rubric, no artist/title shown.
+- **Audition** — plays a track via its YouTube embed; how long it holds your
+  attention is captured silently as a listening event, with an optional 👍/👎.
 - **Essence siblings** — tag two tracks that *feel* like siblings (M3 supervision).
 
 Launch with ``uv run music ui``.
 """
 
+import random
+import time
+
 import streamlit as st
 from sqlmodel import func, select
 
-from core import paths
 from core.config import load_config
 from eval import listening
 from recommend.rank import recommend
@@ -80,50 +82,97 @@ def recommendations_page() -> None:
         st.info("No recommendations yet — extract some tracks, then hit Recommend.")
 
 
-# --- Blind rating --------------------------------------------------------
+# --- Audition ------------------------------------------------------------
 def rating_page() -> None:
     cfg = _config()
     state = st.session_state
-    st.header("🎚️ Blind rating")
-    st.caption("Rate the sound, not the name — artist and title stay hidden.")
+    st.header("🎚️ Audition")
+    st.caption(
+        "Listen, then move on. How long a track holds you is the signal — "
+        "thumbs are optional."
+    )
 
-    if "rate_tracks" not in state:
+    if "audit_tracks" not in state:
         with db.session_scope(cfg) as session:  # type: ignore[arg-type]
             picked = listening.pick_session_tracks(session, count=20)
-            # read attributes while the session is still open — the Track
-            # objects detach once the scope commits and closes.
-            state["rate_tracks"] = [(t.id, t.audio_path) for t in picked]
-        state["rate_pos"] = 0
+            # read attributes while the session is open — Track objects detach
+            # once the scope commits and closes.
+            state["audit_tracks"] = [
+                {
+                    "id": t.id,
+                    "youtube_id": t.youtube_id,
+                    "spotify_id": t.spotify_id,
+                    "duration_ms": t.duration_ms,
+                    "title": t.title,
+                    "artist": t.artist,
+                }
+                for t in picked
+            ]
+        state["audit_pos"] = 0
 
-    tracks = state["rate_tracks"]
-    pos = state["rate_pos"]
+    tracks = state["audit_tracks"]
+    pos = state["audit_pos"]
     if not tracks:
-        st.info("No unrated extracted tracks — extract some first.")
+        st.info("No un-auditioned extracted tracks — extract or crawl more first.")
         return
     if pos >= len(tracks):
-        st.success(f"Session complete — rated {len(tracks)} track(s).")
+        st.success(f"Session complete — auditioned {len(tracks)} track(s).")
+        st.caption("Run `music train` to fold this feedback into the taste model.")
         if st.button("Start a new session"):
-            del state["rate_tracks"]
+            for key in ("audit_tracks", "audit_pos"):
+                state.pop(key, None)
             st.rerun()
         return
 
-    track_id, audio_path = tracks[pos]
+    track = tracks[pos]
     st.progress(pos / len(tracks), text=f"Track {pos + 1} of {len(tracks)}")
-    audio_file = paths.resolve(cfg.paths.audio) / str(audio_path)  # type: ignore[attr-defined]
-    if audio_file.exists():
-        st.audio(str(audio_file))
+
+    # Stamp when this track was first shown — dwell time is the silent signal.
+    shown_key = f"shown_at_{pos}"
+    state.setdefault(shown_key, time.time())
+
+    st.subheader(f"{track['artist']} — {track['title']}")
+
+    preview = st.toggle("Quick preview (random 10s)", key=f"prev_{pos}")
+    if track["youtube_id"]:
+        url = f"https://www.youtube.com/watch?v={track['youtube_id']}"
+        duration_ms = track["duration_ms"] or 0
+        if preview and duration_ms > 25_000:
+            start = state.setdefault(
+                f"prev_start_{pos}", random.randint(5, duration_ms // 1000 - 12)
+            )
+            st.video(url, start_time=start, end_time=start + 10)
+        else:
+            st.video(url)
     else:
-        st.warning("Audio file missing for this track.")
+        st.warning("No YouTube source for this track — nothing to play.")
 
-    vibe = st.slider("Vibe — does it feel right?", 1, 5, 3, key=f"vibe{pos}")
-    replay = st.slider("Replay — would you play it again?", 1, 5, 3, key=f"replay{pos}")
-    skip = st.slider("Skip — urge to skip it?", 1, 5, 3, key=f"skip{pos}")
-    notes = st.text_input("Notes (optional)", key=f"notes{pos}")
+    if track["spotify_id"]:
+        st.link_button(
+            "Open in Spotify ↗", f"https://open.spotify.com/track/{track['spotify_id']}"
+        )
+    else:
+        query = f"{track['artist']} {track['title']}".replace(" ", "%20")
+        st.link_button("Find on Spotify ↗", f"https://open.spotify.com/search/{query}")
 
-    if st.button("Submit & next", type="primary"):
+    st.divider()
+    col_up, col_down, col_next = st.columns(3)
+    thumb: str | None = None
+    if col_up.button("👍 Fits", use_container_width=True):
+        thumb = "up"
+    if col_down.button("👎 Not for me", use_container_width=True):
+        thumb = "down"
+    advance = col_next.button("Next ▶", type="primary", use_container_width=True)
+
+    if thumb is not None or advance:
+        dwell_s = time.time() - state.get(shown_key, time.time())
+        event_type, completion = listening.classify_audition(
+            dwell_s, track["duration_ms"] or 0, thumb
+        )
         with db.session_scope(cfg) as session:  # type: ignore[arg-type]
-            listening.record_rating(session, track_id, vibe, replay, skip, notes or None)
-        state["rate_pos"] = pos + 1
+            listening.record_audition(session, track["id"], event_type, completion)
+        state["audit_pos"] = pos + 1
+        state.pop(shown_key, None)
         st.rerun()
 
 
