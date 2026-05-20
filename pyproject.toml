@@ -27,7 +27,7 @@ dependencies = [
 extraction = [
     "torch>=2.4",
     "torchaudio>=2.4",
-    "transformers>=4.44",
+    "transformers>=4.40,<4.49",  # MERT's remote code is sensitive to newer APIs
     "librosa>=0.10",
     "soundfile>=0.12",
     "pyarrow>=17.0",
@@ -50,6 +50,14 @@ dev = [
     "pyright>=1.1.380",
     "pre-commit>=4.0",
 ]
+# Research notebooks (UMAP sanity checks etc.). Sync with:
+#   uv sync --extra extraction --group notebooks
+notebooks = [
+    "matplotlib>=3.9",
+    "pandas>=2.2",
+    "nbconvert>=7.16",
+    "ipykernel>=6.29",
+]
 
 [project.scripts]
 music = "ui.cli:main"
@@ -57,6 +65,16 @@ music = "ui.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# torch/torchaudio come from the CUDA 12.4 wheel index (RTX 3060, CUDA 12.x).
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
 
 # src/ layout: each subdirectory is a top-level importable package
 # (e.g. `from acquisition import AudioSource`). See CLAUDE.md module map.

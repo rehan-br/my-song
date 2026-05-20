@@ -7,6 +7,7 @@ optional user override) mirrors Hydra's ``defaults`` list and can migrate to
 full Hydra when the taste-model trainer needs multirun sweeps.
 """
 
+import hashlib
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
@@ -35,3 +36,15 @@ def load_config(
 
     assert isinstance(cfg, DictConfig)
     return cfg
+
+
+def config_hash(cfg: DictConfig) -> str:
+    """Stable short hash of the extraction-relevant config (invariant 2).
+
+    Covers ``models`` (foundation-model pins) and ``extraction`` (sample rates,
+    pooling params). Every features row stores this so re-running extraction
+    with a changed config is detectable rather than silently overwriting.
+    """
+    relevant = OmegaConf.create({"models": cfg.models, "extraction": cfg.extraction})
+    text = OmegaConf.to_yaml(relevant, sort_keys=True)
+    return hashlib.sha1(text.encode()).hexdigest()[:12]

@@ -15,13 +15,17 @@ paths:
   logs: logs
 
 spotify:
-  # Read-only scopes. user-top-read + user-read-recently-played feed the
-  # automatic engagement weighting (see taste.engagement below).
+  # user-top-read + user-read-recently-played feed engagement weighting;
+  # streaming + user-read-{email,private} power the Premium Web Playback SDK
+  # audition player. Changing this list requires re-running `music auth`.
   scopes:
     - user-library-read
     - playlist-read-private
     - user-top-read              # top tracks — taste affinity signal
     - user-read-recently-played  # recent plays — recency signal
+    - streaming                  # Web Playback SDK — in-app Premium playback
+    - user-read-email            # required by the Web Playback SDK
+    - user-read-private          # Premium check (account product tier)
   # Must exactly match a Redirect URI registered on the Spotify app.
   # Spotify requires a loopback IP (127.0.0.1), not "localhost".
   redirect_uri: "http://127.0.0.1:8080/callback"
@@ -29,6 +33,7 @@ spotify:
 acquisition:
   # Reject a yt-dlp match if its duration is off by more than this fraction.
   duration_tolerance: 0.10
+  download_workers: 8   # parallel yt-dlp fetches (downloading is network-bound)
   youtube:
     audio_format: m4a
     search_results: 5
@@ -38,6 +43,24 @@ acquisition:
 # observed data; how those translate into influence is owned by the taste
 # model + feedback loop (Phase 2+), not a hand-tuned formula here.
 
+taste:
+  m2:                  # M2 aspect-weighted contrastive model
+    epochs: 300        # InfoNCE optimisation steps
+    lr: 0.05
+    temperature: 0.1   # InfoNCE softmax temperature
+  composite:           # `recommend --composite` blend weights
+    mert_weight: 0.6
+    clap_weight: 0.4
+  m3:                  # M3 manifold model (VAE over liked embeddings)
+    latent_dim: 16
+    hidden: 256
+    epochs: 400
+    lr: 0.001
+    beta: 0.001        # KL weight (beta-VAE — small, the data set is tiny)
+  engagement:          # automatic taste_weight from silent listening signals
+    prior_strength: 3.0  # pseudo-observations anchoring weight at 1.0 — a
+                         # generic regulariser, NOT tuned to any one user
+
 logging:
   level: INFO
   json_file: true
@@ -46,3 +69,14 @@ extraction:
   # Sample rates — invariant 8: MERT 24kHz, CLAP 48kHz. Do not mix.
   target_sr_mert: 24000
   target_sr_clap: 48000
+  device: auto    # auto | cuda | cpu
+  fp16: true      # mixed-precision inference on CUDA
+  seed: 42        # determinism (invariant 7)
+  decode_workers: 4   # threads decoding audio ahead of the GPU
+  prefetch: 8         # decoded tracks kept buffered for the GPU
+  mert:
+    chunk_seconds: 5   # MERT was trained on ~5s clips; songs are chunked + pooled
+    batch_size: 8      # ~1.5GB VRAM at fp16 (hardware notes)
+  clap:
+    chunk_seconds: 10  # CLAP windows; per-window embeddings are mean-pooled
+    batch_size: 16

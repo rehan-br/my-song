@@ -15,6 +15,8 @@ from spotipy.cache_handler import CacheFileHandler
 from spotipy.oauth2 import SpotifyOAuth
 
 from acquisition.base import Provenance, TrackRef
+from acquisition.events import RecentPlay
+from acquisition.resolver import duration_matches
 from core import paths
 from core.logging import get_logger
 
@@ -23,6 +25,27 @@ log = get_logger("spotify")
 
 class SpotifyAuthError(RuntimeError):
     """Raised when Spotify credentials are missing."""
+
+
+def _best_spotify_match(
+    items: list[dict[str, Any]], duration_ms: int
+) -> dict[str, Any] | None:
+    """Pick the duration-closest search result that passes the sanity check.
+
+    Mirrors the yt-dlp resolver's guard — reject a match whose length is off by
+    more than the tolerance, so the player never auditions the wrong track.
+    """
+    viable = [
+        item
+        for item in items
+        if item.get("id")
+        and duration_matches(duration_ms or None, item.get("duration_ms"))
+    ]
+    if not viable:
+        return None
+    if duration_ms:
+        viable.sort(key=lambda item: abs((item.get("duration_ms") or 0) - duration_ms))
+    return viable[0]
 
 
 def _track_to_ref(track: dict[str, Any]) -> TrackRef:
@@ -34,6 +57,11 @@ def _track_to_ref(track: dict[str, Any]) -> TrackRef:
         duration_ms=track.get("duration_ms") or 0,
         spotify_id=track["id"],
     )
+
+
+def _chunks(items: list[str], size: int) -> Iterator[list[str]]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
 
 
 class SpotifyClient:
@@ -149,3 +177,80 @@ class SpotifyClient:
             if track_id not in out or ts > out[track_id]:
                 out[track_id] = ts
         return out
+
+    def access_token(self) -> str:
+        """Return a currently-valid access token (refreshing if near expiry).
+
+        Needed by the browser-side Web Playback SDK, which authenticates with a
+        raw bearer token rather than the spotipy client.
+        """
+        token_info = self._auth.validate_token(self._auth.cache_handler.get_cached_token())
+        if not token_info:
+            raise SpotifyAuthError("not authenticated — run `music auth` first")
+        return str(token_info["access_token"])
+
+    def is_premium(self) -> bool:
+        """True if the account is Spotify Premium — the Web Playback SDK needs it."""
+        return self._sp.current_user().get("product") == "premium"
+
+    def find_track_uri(self, artist: str, title: str, duration_ms: int = 0) -> str | None:
+        """Search Spotify for a track; return the best match's URI, or None.
+
+        Makes a crawled track (which carries no Spotify id) playable by the Web
+        Playback SDK. Duration-checked, so a live cut or remix is not auditioned
+        in place of the real track.
+        """
+        query = f"{title} {artist}".strip()
+        if not query:
+            return None
+        results = self._sp.search(q=query, type="track", limit=5)
+        items = (results.get("tracks") or {}).get("items") or []
+        best = _best_spotify_match(items, duration_ms)
+        return str(best["uri"]) if best else None
+
+    def iter_recent_plays(self) -> list[RecentPlay]:
+        """Return recently-played items, newest-first, for silent-signal ingestion.
+
+        The window is shallow (~50 plays); call regularly so history accumulates
+        across syncs. Skip/complete is inferred downstream — see
+        ``acquisition.events.infer_events``.
+        """
+        page = self._sp.current_user_recently_played(limit=50)
+        plays: list[RecentPlay] = []
+        for item in page.get("items", []):
+            track = item.get("track") or {}
+            played_at = item.get("played_at")
+            if not track.get("id") or not played_at:
+                continue
+            ts = datetime.fromisoformat(played_at.replace("Z", "+00:00"))
+            ts = ts.astimezone(UTC).replace(tzinfo=None)
+            plays.append(
+                RecentPlay(
+                    spotify_id=track["id"],
+                    duration_ms=track.get("duration_ms") or 0,
+                    played_at=ts,
+                    context=(item.get("context") or {}).get("type"),
+                )
+            )
+        return plays
+
+    def track_genres(self, track_ids: list[str]) -> dict[str, list[str]]:
+        """Map Spotify track id -> its primary artist's genres.
+
+        Genres are an artist-level field on Spotify; each track is labelled with
+        its first-listed artist's genres. Used to colour the sanity-check plots.
+        """
+        track_to_artist: dict[str, str] = {}
+        for batch in _chunks(track_ids, 50):
+            for track in self._sp.tracks(batch).get("tracks", []):
+                artists = (track or {}).get("artists") or []
+                if track and artists:
+                    track_to_artist[track["id"]] = artists[0]["id"]
+
+        artist_genres: dict[str, list[str]] = {}
+        for batch in _chunks(sorted(set(track_to_artist.values())), 50):
+            for artist in self._sp.artists(batch).get("artists", []):
+                if artist:
+                    artist_genres[artist["id"]] = artist.get("genres", [])
+
+        return {tid: artist_genres.get(aid, []) for tid, aid in track_to_artist.items()}

@@ -11,7 +11,9 @@ from storage import schema  # noqa: F401 — registers table metadata
 
 @pytest.fixture
 def session() -> Iterator[Session]:
-    """An isolated in-memory SQLite session with all tables created."""
+    """An isolated in-memory SQLite session with all tables + the default user."""
+    from storage.users import ensure_default_user
+
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -19,4 +21,6 @@ def session() -> Iterator[Session]:
     )
     SQLModel.metadata.create_all(engine)
     with Session(engine) as s:
+        ensure_default_user(s)
+        s.commit()
         yield s
