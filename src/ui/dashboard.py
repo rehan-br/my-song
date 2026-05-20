@@ -12,7 +12,6 @@ Launch with ``uv run music ui``.
 import time
 
 import streamlit as st
-import streamlit.components.v1 as components
 from sqlmodel import func, select
 
 from core.config import load_config
@@ -84,35 +83,48 @@ def _spotify_player_html(token: str, track_uri: str) -> str:
     """A self-contained Spotify Web Playback SDK player (one Play button)."""
     template = """
 <div style="font-family:sans-serif;color:#ddd;">
-  <button id="play" style="padding:8px 20px;font-size:15px;border-radius:20px;
+  <button id="mte-play" style="padding:8px 20px;font-size:15px;border-radius:20px;
     border:none;background:#1db954;color:#fff;cursor:pointer;">&#9654; Play full song</button>
-  <span id="status" style="margin-left:12px;color:#999;">loading&hellip;</span>
+  <span id="mte-status" style="margin-left:12px;color:#999;">loading&hellip;</span>
 </div>
 <script>
-window.onSpotifyWebPlaybackSDKReady = () => {
+(() => {
   const token = "__TOKEN__", uri = "__URI__";
-  const status = document.getElementById('status');
-  let deviceId = null;
-  const player = new Spotify.Player({
-    name: 'Music Taste Engine', getOAuthToken: cb => cb(token), volume: 0.6});
-  player.addListener('ready', e => { deviceId = e.device_id; status.textContent = 'ready'; });
-  player.addListener('not_ready', () => { status.textContent = 'device offline'; });
-  player.addListener('account_error', () => { status.textContent = 'Spotify Premium required'; });
-  player.addListener('authentication_error', () => { status.textContent = 're-run music auth'; });
-  player.addListener('initialization_error', e => { status.textContent = e.message; });
-  player.connect();
-  document.getElementById('play').onclick = () => {
-    if (!deviceId) { status.textContent = 'still connecting\\u2026'; return; }
-    fetch('https://api.spotify.com/v1/me/player/play?device_id=' + deviceId, {
-      method: 'PUT', body: JSON.stringify({uris: [uri]}),
-      headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
-    }).then(r => {
-      status.textContent = r.ok ? '\\u266a playing' : 'play failed (' + r.status + ')';
-    });
+  const setup = () => {
+    const status = document.getElementById('mte-status');
+    const play = document.getElementById('mte-play');
+    if (!status || !play) return;
+    let deviceId = null;
+    const player = new Spotify.Player({
+      name: 'Music Taste Engine', getOAuthToken: cb => cb(token), volume: 0.6});
+    player.addListener('ready', e => { deviceId = e.device_id; status.textContent = 'ready'; });
+    player.addListener('not_ready', () => { status.textContent = 'device offline'; });
+    player.addListener('account_error', () => { status.textContent = 'Spotify Premium required'; });
+    player.addListener('authentication_error', () => { status.textContent = 're-run music auth'; });
+    player.addListener('initialization_error', e => { status.textContent = e.message; });
+    player.connect();
+    play.onclick = () => {
+      if (!deviceId) { status.textContent = 'still connecting\\u2026'; return; }
+      fetch('https://api.spotify.com/v1/me/player/play?device_id=' + deviceId, {
+        method: 'PUT', body: JSON.stringify({uris: [uri]}),
+        headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'}
+      }).then(r => {
+        status.textContent = r.ok ? '\\u266a playing' : 'play failed (' + r.status + ')';
+      });
+    };
   };
-};
+  // On Streamlit reruns the SDK script may already have executed and won't
+  // re-fire onSpotifyWebPlaybackSDKReady — run setup immediately if so.
+  window.onSpotifyWebPlaybackSDKReady = setup;
+  if (window.Spotify && window.Spotify.Player) { setup(); return; }
+  if (!document.getElementById('mte-sdk-script')) {
+    const s = document.createElement('script');
+    s.id = 'mte-sdk-script';
+    s.src = 'https://sdk.scdn.co/spotify-player.js';
+    document.head.appendChild(s);
+  }
+})();
 </script>
-<script src="https://sdk.scdn.co/spotify-player.js"></script>
 """
     return template.replace("__TOKEN__", token).replace("__URI__", track_uri)
 
@@ -222,7 +234,9 @@ def rating_page() -> None:
     uri = _resolve_track_uri(track["spotify_id"], track["artist"], track["title"], duration_ms)
 
     if token and uri:
-        components.html(_spotify_player_html(token, uri), height=72)
+        # st.html renders inline in the main page — needed for the Web Playback
+        # SDK's encrypted-media (DRM) permission, which a sandboxed iframe denies.
+        st.html(_spotify_player_html(token, uri), unsafe_allow_javascript=True)
     elif not token:
         st.info(
             "🎧 **Spotify Premium?** Re-run `music auth` to grant playback and "
