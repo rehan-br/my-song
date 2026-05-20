@@ -16,21 +16,21 @@ from core.config import config_hash
 from core.logging import get_logger
 from recommend.rank import split_pool
 from storage import vectors
-from storage.schema import EssenceSibling, Rating, TasteModelRun, Track
+from storage.schema import DEFAULT_USER_ID, EssenceSibling, Rating, TasteModelRun, Track
 from taste_model.contrastive import ContrastiveModel
 from taste_model.engagement import refresh_engagement_weights
 
 log = get_logger("trainer")
 
 
-def checkpoint_path(cfg: DictConfig) -> Path:
-    """Where the trained M2 (contrastive) weight checkpoint lives."""
-    return paths.resolve(cfg.paths.data) / "models" / "m2.npz"
+def checkpoint_path(cfg: DictConfig, user_id: str = DEFAULT_USER_ID) -> Path:
+    """Where the trained M2 (contrastive) weight checkpoint lives, per user."""
+    return paths.resolve(cfg.paths.data) / "models" / user_id / "m2.npz"
 
 
-def m3_checkpoint_path(cfg: DictConfig) -> Path:
-    """Where the trained M3 (manifold VAE) checkpoint lives."""
-    return paths.resolve(cfg.paths.data) / "models" / "m3.pt"
+def m3_checkpoint_path(cfg: DictConfig, user_id: str = DEFAULT_USER_ID) -> Path:
+    """Where the trained M3 (manifold VAE) checkpoint lives, per user."""
+    return paths.resolve(cfg.paths.data) / "models" / user_id / "m3.pt"
 
 
 def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:

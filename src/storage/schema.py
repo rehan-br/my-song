@@ -67,6 +67,27 @@ class EventType(StrEnum):
     preview = "preview"  # short audition in the local UI
 
 
+DEFAULT_USER_ID = "default"
+"""The single user id today — the seam for per-user data when productionization
+adds real auth. Every user-scoped row defaults its ``user_id`` to this, so
+single-user behaviour keeps working without changing any call sites."""
+
+
+class User(SQLModel, table=True):
+    """A taste profile.
+
+    Only the ``default`` user exists today; the per-user-keyed foreign keys on
+    Rating/ListeningEvent/EssenceSibling/TasteModelRun/TrackSource make adding
+    real users a configuration change rather than a data migration.
+    """
+
+    __tablename__ = "users"
+
+    id: str = Field(primary_key=True)
+    name: str
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
 class Track(SQLModel, table=True):
     """One resolved track. External IDs are nullable and individually unique."""
 
@@ -101,6 +122,10 @@ class Track(SQLModel, table=True):
 class TrackSource(SQLModel, table=True):
     """A track's provenance. One track may have several rows (e.g. it is both
     a saved track and present in two playlists). Used to seed Track.taste_weight.
+
+    Provenance is per-user (a saved track is "saved by *whom*"); the unique
+    constraint is single-user today and should grow ``user_id`` when real
+    multi-user lands.
     """
 
     __tablename__ = "track_sources"
@@ -109,6 +134,7 @@ class TrackSource(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(default=DEFAULT_USER_ID, foreign_key="users.id", index=True)
     track_id: str = Field(foreign_key="tracks.id", index=True)
     source_type: SourceType
     source_ref: str = ""  # playlist id; "" for saved/manual
@@ -175,6 +201,7 @@ class Rating(SQLModel, table=True):
     __tablename__ = "ratings"
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(default=DEFAULT_USER_ID, foreign_key="users.id", index=True)
     track_id: str = Field(foreign_key="tracks.id", index=True)
     rated_at: datetime = Field(default_factory=_utcnow)
     vibe: int = Field(ge=1, le=5)
@@ -199,6 +226,7 @@ class ListeningEvent(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(default=DEFAULT_USER_ID, foreign_key="users.id", index=True)
     track_id: str = Field(foreign_key="tracks.id", index=True)
     event_type: EventType
     occurred_at: datetime = Field(index=True)  # when the listen happened
@@ -223,6 +251,7 @@ class EssenceSibling(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(default=DEFAULT_USER_ID, foreign_key="users.id", index=True)
     track_a: str = Field(foreign_key="tracks.id", index=True)
     track_b: str = Field(foreign_key="tracks.id", index=True)
     strength: float = Field(ge=0.0, le=1.0)
@@ -246,6 +275,7 @@ class TasteModelRun(SQLModel, table=True):
     __tablename__ = "taste_model_runs"
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: str = Field(default=DEFAULT_USER_ID, foreign_key="users.id", index=True)
     version: str
     started_at: datetime = Field(default_factory=_utcnow)
     config_hash: str
