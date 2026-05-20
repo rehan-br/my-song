@@ -18,6 +18,7 @@ from recommend.rank import split_pool
 from storage import vectors
 from storage.schema import EssenceSibling, Rating, TasteModelRun, Track
 from taste_model.contrastive import ContrastiveModel
+from taste_model.engagement import refresh_engagement_weights
 
 log = get_logger("trainer")
 
@@ -33,7 +34,14 @@ def m3_checkpoint_path(cfg: DictConfig) -> Path:
 
 
 def train_contrastive(cfg: DictConfig, session: Session) -> dict[str, float]:
-    """Train M2 on the current library + crawled pool; save the checkpoint."""
+    """Train M2 on the current library + crawled pool; save the checkpoint.
+
+    Refreshes engagement weights from any new listening events first, so a
+    `music train` after an audition session actually folds in that feedback —
+    matching the UI's promise.
+    """
+    refresh_engagement_weights(session, cfg)
+
     store = vectors.read_embeddings(vectors.song_embedding_path(cfg, "mert_song"))
     if not store:
         raise RuntimeError("no MERT embeddings — run `music extract` first")
